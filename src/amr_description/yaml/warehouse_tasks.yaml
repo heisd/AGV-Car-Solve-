@@ -1,0 +1,23 @@
+# 调度中心 (fleet_manager) 的区域 + 任务定义 —— 坐标匹配 worlds/warehouse.world
+# 仓库内部 14x14m，货架占 x∈[-2.45,2.45]、y∈[-4.9,4.5]；
+# 这里所有 zone 都放在四周通道/角落。
+#
+# cx,cy = 语义中心（取货/卸货/充电站的实际位置，用于显示与到达判定）
+# gx,gy = 可选「导航接近点」。当语义中心落在实体障碍内（如取货托盘、充电柜）时，
+#         Nav2 全局规划器无法把目标设在障碍中心（膨胀层会让该格不可达），
+#         因此把导航目标设到障碍旁的空地；到达判定也按该接近点。
+#         缺省回退到 cx,cy（空地 zone 无需 gx,gy）。
+zones:
+  # 东北角取货：world 里 (5.5,5.5) 放了 euro_pallet + grey_tote（实体障碍），
+  # 障碍中心 + 0.7m 膨胀层不可达 → 接近点取托盘正南的走廊空地。
+  pickup_A:   {cx:  5.5, cy:  5.5, sx: 1.5, sy: 1.5, yaw: 0.0, gx: 5.5, gy: 3.8}
+  pickup_B:   {cx: -5.5, cy:  5.5, sx: 1.5, sy: 1.5, yaw: 0.0}   # 西北角取货 (空地)
+  dropoff_A:  {cx:  5.5, cy: -5.5, sx: 1.5, sy: 1.5, yaw: 0.0}   # 东南角卸货 (沿东侧走廊 x=5.5 直达)
+  dropoff_B:  {cx: -5.5, cy: -2.5, sx: 1.5, sy: 1.5, yaw: 0.0}   # 西侧走廊卸货 (沿 x=-5.5 直达)
+  # 西南角充电：充电柜在 (-5.5,-5.5) 中心南侧 0.8m；接近点取中心正北 0.7m，
+  # 既避开充电柜膨胀层，又落在 charger_dock_monitor 的 0.8m 触发半径内。
+  charger_1:  {cx: -5.5, cy: -5.5, sx: 2.0, sy: 2.0, yaw: 0.0, gx: -5.5, gy: -4.8}
+
+tasks:
+  - {id: T1, pickup: pickup_A, dropoff: dropoff_A, load_time: 3.0, unload_time: 3.0, priority: 1}
+  - {id: T2, pickup: pickup_B, dropoff: dropoff_B, load_time: 3.0, unload_time: 3.0, priority: 1}

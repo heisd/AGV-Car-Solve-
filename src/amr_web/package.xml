@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>amr_web</name>
+  <version>0.1.0</version>
+  <description>Web operator panel for the AMR fleet dispatch center (rosbridge + roslibjs).</description>
+  <maintainer email="jvf36276@gmail.com">li</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rosbridge_server</exec_depend>
+  <exec_depend>rosapi</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

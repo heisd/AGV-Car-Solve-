@@ -1,0 +1,48 @@
+# docker/docker-compose.yml
+services:
+  amr-ros-dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: amr-ros-dev:humble
+    container_name: amr-ros-dev          # keep a single service's fixed name
+    network_mode: host
+    tty: true                        # keep TTY open (like `-t`)
+    stdin_open: true                 # keep STDIN open (like `-i`)
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+      - LIBGL_ALWAYS_SOFTWARE=1
+      - MESA_GL_VERSION_OVERRIDE=3.3
+      - UID=${UID:-1000}
+      - GID=${GID:-1000}
+    volumes:
+      - ../:/workspace:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /mnt/wslg:/mnt/wslg:ro       # helpful on WSLg; harmless elsewhere
+    # Remove /dev/dri if running in VirtualBox without 3D acceleration
+    devices:
+      - /dev/dri:/dev/dri
+    command: bash                    # PID 1 stays interactive
+
+  # GPU profile — DIFFERENT name to avoid collisions
+  amr-ros-dev-gpu:
+    profiles: ["gpu"]
+    image: amr-ros-dev:humble
+    container_name: amr-ros-dev-gpu      # <-- different name than amr-dev
+    network_mode: host
+    tty: true
+    stdin_open: true
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - LIBGL_ALWAYS_INDIRECT=0
+      - UID=${UID:-1000}
+      - GID=${GID:-1000}
+    volumes:
+      - ../:/workspace:rw
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /mnt/wslg:/mnt/wslg:ro
+    devices:
+      - /dev/dri:/dev/dri            # only on hosts that expose it
+    command: bash
