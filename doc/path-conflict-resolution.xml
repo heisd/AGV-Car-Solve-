@@ -1,0 +1,266 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  多 AGV 路径冲突解决方案 — 结构化说明文档 (XML)
+  对应实现: src/amr_description/amr_description/fleet_manager.py (apply_traffic_rules 及其辅助方法)
+  配套文档: doc/right-of-way-design.md, doc/path-conflict-optimization-plan.md
+  所有数值（坐标 / 优先级 / 阈值）均与源码保持一致，源码为唯一事实来源。
+-->
+<path-conflict-resolution version="3.0" date="2026-06-20" source-of-truth="fleet_manager.py">
+
+  <metadata>
+    <title>多 AGV 仓库路径冲突解决方案：走廊段占用制路权（每拍重建 · 原子获取 · 同向共享）</title>
+    <project>GazeboLib 仓库仿真</project>
+    <stack>ROS2 Humble + Nav2 + Gazebo Classic</stack>
+    <implementation file="src/amr_description/amr_description/fleet_manager.py" class="FleetManager"/>
+    <fleet-size min="2" max="3" namespaces="agv1,agv2,agv3"/>
+    <warehouse size="14x14m" layout="四周单行走廊(宽约2m) + 中央货架区 + 中央南北过道"/>
+  </metadata>
+
+  <!-- ============================================================ -->
+  <!-- 1. 问题定义                                                  -->
+  <!-- ============================================================ -->
+  <problem id="path-conflict">
+    <summary>
+      多台 AGV 在狭窄(~2m)单行走廊中执行取货/卸货/充电任务时，会在同一走廊段相遇，
+      引发对头冲突、互相阻挡、死锁与车体碰撞。Nav2 的局部 costmap 避障在窄道里
+      为时已晚（无处可避），需要在调度层提前裁决"谁先走"。
+    </summary>
+    <legacy-defects note="v2.0 走廊段预约制（已被 v3.0 取代）的实现缺陷，见 path-conflict-optimization-plan.md">
+      <defect id="D1" severity="critical">多段获取非原子：逐段预约 + 整车单一 _yielding 标志，set 迭代顺序不定，
+        后处理的段会覆盖前段的让行决定 → 过路口时约一半概率不让行而直接驶入被占段。</defect>
+      <defect id="D2" severity="critical">抢占不检查占有者是否已物理在段内，且被抢者未被立即制动 →
+        可能逼停/穿插正在窄道行驶的车，制造对向相撞。</defect>
+      <defect id="D3" severity="high">持有-等待：让行车不释放已占段，路口双段竞争且同优先级时形成循环等待死锁。</defect>
+      <defect id="D4" severity="medium">heading_direction 为死代码 → 同向车也被单行互斥，无法跟车，吞吐低。</defect>
+      <defect id="D5" severity="medium">按整条规划路径预约整段（whole-side）→ 远处即锁死整侧走廊。</defect>
+      <defect id="D6" severity="medium">等待点无失速看护 / 不互斥；队列优先级反转；让行状态字段易失步；边界无迟滞。</defect>
+    </legacy-defects>
+  </problem>
+
+  <!-- ============================================================ -->
+  <!-- 2. 解决方案                                                  -->
+  <!-- ============================================================ -->
+  <solution id="segment-occupancy-rebuild">
+    <chosen-strategy>走廊段占用制：每拍从零重建占用 + 原子获取 + 禁止持有-等待 + 物理在位者锁定 + 隐式优先级抢占 + 同向共享 + 久堵后撤兜底</chosen-strategy>
+    <core-idea>
+      不再维护"跨拍持久的段预约 + 等待队列"。每个 250ms 控制拍 apply_traffic_rules() 从零重建
+      段占用表：先锁定"物理已在段内"的车，再按 (优先级降序, ns 升序) 让新进入者原子获取其全部需求段。
+      让行车不持有任何段。无显式抢占/驱逐代码——高优先级车被先处理即自然先得段。
+    </core-idea>
+    <invariants>
+      <invariant id="I1" name="原子获取">一台车要么拿到它需要的全部段，要么一段都不新占
+        （消除 D1 的同 tick 决策互相覆盖与 set 顺序不确定性）。</invariant>
+      <invariant id="I2" name="禁止持有-等待">让行车不新占任何段，破坏死锁四条件之一（消除 D3）。</invariant>
+      <invariant id="I3" name="物理在位者绝对优先">已物理处于某段的车在本拍锁定该段，任何车
+        （即便更高优先级）都不能挤走它——安全第一，避免段内对撞（消除 D2）。</invariant>
+      <invariant id="I4" name="隐式优先级抢占">按 (优先级降序, ns 升序) 处理新进入者，高优先级先选段，
+        低优先级遇占用即在入口让行；无需显式驱逐"已入段"的车（安全地实现 D2 想要的抢占语义）。</invariant>
+      <invariant id="I5" name="同向共享">同一段允许 SEGMENT_CAPACITY 台"同向"车跟车通行，仅对向/满载才互斥（消除 D4）。</invariant>
+    </invariants>
+    <three-layer-defense>
+      <layer order="1" name="区域互斥" data="_zone_owner" protects="目的地（取货点/卸货点/充电站）"/>
+      <layer order="2" name="走廊段占用" data="_segment_occupants" protects="路径（走廊通道）"/>
+      <layer order="3" name="碰撞检测" data="_collisions" protects="安全兜底（最后防线，告警 + 报前端）"/>
+    </three-layer-defense>
+  </solution>
+
+  <!-- ============================================================ -->
+  <!-- 3. 走廊段定义 (CORRIDOR_SEGMENTS)                            -->
+  <!-- ============================================================ -->
+  <corridor-segments source="fleet_manager.py:CORRIDOR_SEGMENTS" sharing="同向多车(≤SEGMENT_CAPACITY)，对向/满载互斥">
+    <segment name="corridor_east" axis="南北(取y分量判向)" width="2.0m">
+      <bounds x_min="4.5" x_max="6.5" y_min="-6.5" y_max="6.5"/>
+      <use>东侧走廊，连接 pickup_A &lt;-&gt; dropoff_A</use>
+    </segment>
+    <segment name="corridor_west" axis="南北(取y分量判向)" width="2.0m">
+      <bounds x_min="-6.5" x_max="-4.5" y_min="-6.5" y_max="6.5"/>
+      <use>西侧走廊，连接 pickup_B &lt;-&gt; charger_1</use>
+    </segment>
+    <segment name="corridor_north" axis="东西(取x分量判向)" width="2.0m">
+      <bounds x_min="-6.5" x_max="6.5" y_min="4.5" y_max="6.5"/>
+      <use>北横向走廊，连接 pickup_A &lt;-&gt; pickup_B</use>
+    </segment>
+    <segment name="corridor_south" axis="东西(取x分量判向)" width="2.0m">
+      <bounds x_min="-6.5" x_max="6.5" y_min="-6.5" y_max="-4.5"/>
+      <use>南横向走廊，连接 dropoff_A &lt;-&gt; charger_1</use>
+    </segment>
+    <segment name="corridor_center_ns" axis="南北(取y分量判向)" width="2.0m">
+      <bounds x_min="-1.0" x_max="1.0" y_min="-6.5" y_max="6.5"/>
+      <use>中央南北通道（货架间过道）</use>
+    </segment>
+
+    <intersections note="车进入交叉区时同时处于两个段，须原子地同时获取两段（拿不全则在入口让行）">
+      <intersection name="东北角" seg1="corridor_east" seg2="corridor_north" x="[4.5,6.5]" y="[4.5,6.5]"/>
+      <intersection name="东南角" seg1="corridor_east" seg2="corridor_south" x="[4.5,6.5]" y="[-6.5,-4.5]"/>
+      <intersection name="西北角" seg1="corridor_west" seg2="corridor_north" x="[-6.5,-4.5]" y="[4.5,6.5]"/>
+      <intersection name="西南角" seg1="corridor_west" seg2="corridor_south" x="[-6.5,-4.5]" y="[-6.5,-4.5]"/>
+      <intersection name="北中央" seg1="corridor_center_ns" seg2="corridor_north" x="[-1.0,1.0]" y="[4.5,6.5]"/>
+      <intersection name="南中央" seg1="corridor_center_ns" seg2="corridor_south" x="[-1.0,1.0]" y="[-6.5,-4.5]"/>
+    </intersections>
+  </corridor-segments>
+
+  <!-- ============================================================ -->
+  <!-- 4. 等待点定义 (WAIT_POINTS)                                  -->
+  <!-- ============================================================ -->
+  <wait-points source="fleet_manager.py:WAIT_POINTS"
+               purpose="让行车退到被让走廊之外的相邻(垂直)走廊里等待——不占用被让走廊，避免「驶到入口即成为在位者→自我解除让行」的来回横跳(v3.0 修正，2车整机回归发现)">
+    <wait-point name="corridor_east_south"   x="4.0"  y="-5.5" corridor="corridor_east"       in-segment="corridor_south" desc="东走廊南口外(南走廊内)"/>
+    <wait-point name="corridor_east_north"   x="4.0"  y="5.5"  corridor="corridor_east"       in-segment="corridor_north" desc="东走廊北口外(北走廊内)"/>
+    <wait-point name="corridor_west_south"   x="-4.0" y="-5.5" corridor="corridor_west"       in-segment="corridor_south" desc="西走廊南口外(南走廊内)"/>
+    <wait-point name="corridor_west_north"   x="-4.0" y="5.5"  corridor="corridor_west"       in-segment="corridor_north" desc="西走廊北口外(北走廊内)"/>
+    <wait-point name="corridor_north_east"   x="5.5"  y="4.0"  corridor="corridor_north"      in-segment="corridor_east"  desc="北走廊东口外(东走廊内)"/>
+    <wait-point name="corridor_north_west"   x="-5.5" y="4.0"  corridor="corridor_north"      in-segment="corridor_west"  desc="北走廊西口外(西走廊内)"/>
+    <wait-point name="corridor_south_east"   x="5.5"  y="-4.0" corridor="corridor_south"      in-segment="corridor_east"  desc="南走廊东口外(东走廊内)"/>
+    <wait-point name="corridor_south_west"   x="-5.5" y="-4.0" corridor="corridor_south"      in-segment="corridor_west"  desc="南走廊西口外(西走廊内)"/>
+    <wait-point name="corridor_center_south" x="2.0"  y="-5.5" corridor="corridor_center_ns"  in-segment="corridor_south" desc="中央通道南口外(南走廊内)"/>
+    <wait-point name="corridor_center_north" x="2.0"  y="5.5"  corridor="corridor_center_ns"  in-segment="corridor_north" desc="中央通道北口外(北走廊内)"/>
+
+    <selection-strategy method="nearest_wait_point(ns, segment_name)">
+      <step>筛出名字以被挡段名为前缀的等待点（同一走廊的入口）。</step>
+      <step>剔除会被段内占用车阻挡的等待点：若占用车位置介于本车与该等待点之间则跳过
+            （南北走廊比 y 坐标，东西走廊比 x 坐标）。</step>
+      <step>等待点互斥：剔除已被其他让行车 (_wait_target) 占用(≤standby_tol)的等待点，避免两车挤同一点相撞。</step>
+      <step>在剩余候选中返回离本车最近者；若都被占则退回不排除占用的最近点。</step>
+    </selection-strategy>
+    <retreat-strategy method="_retreat_wait_point(ns)" note="久堵兜底用：选本车所在段的等待点中、离被挡段中心最远者（向后撤离方向）"/>
+  </wait-points>
+
+  <!-- ============================================================ -->
+  <!-- 5. 优先级规则 (PRIORITY)                                     -->
+  <!-- ============================================================ -->
+  <priorities source="fleet_manager.py:PRIORITY" rule="数值大者优先通行；新进入者按 (优先级降序, ns 升序) 处理">
+    <level value="5" states="TO_CHARGER,CHARGING" desc="充电车最高优先级（缺电不能被堵）"/>
+    <level value="4" states="TO_DROPOFF,UNLOADING" desc="载货送货（已携带货物，尽快完成）"/>
+    <level value="3" states="TO_PICKUP,LOADING"    desc="去取货（尚未携带货物）"/>
+    <level value="1" states="IDLE"                 desc="空闲/返回待命点（最低优先级）"/>
+    <default value="1" note="robot_priority() 对未列出状态默认返回 1"/>
+    <tie-break>同优先级按命名空间字典序 (agv1 &lt; agv2 &lt; agv3) 确定先后——确定且唯一，不存在对等互让。</tie-break>
+  </priorities>
+
+  <!-- ============================================================ -->
+  <!-- 6. 冲突裁决规则                                              -->
+  <!-- ============================================================ -->
+  <conflict-resolution-rules source="fleet_manager.py:_can_admit + apply_traffic_rules">
+    <rule id="1" name="物理在位锁定">物理已在段内的车在本拍无条件占有该段；其方向写入 _segment_dir（首位占用者定向）。</rule>
+    <rule id="2" name="可进入判定 (_can_admit)">对"尚未占有、想进入"的段：空段可进；同向且未达 SEGMENT_CAPACITY 可并入车队；
+      对向或满载则不可进。任何车都无法挤走"已在段内"的车。</rule>
+    <rule id="3" name="原子提交 / 持有-等待禁止">车若能进入它"想进入"的全部段则一次性全部占有；只要有一个进不去，则一段都不新占、转为让行。</rule>
+    <rule id="4" name="隐式抢占（按序处理）">新进入者按 (优先级降序, ns 升序) 依次处理，高优先级先占段，低优先级随后遇占用即让行。</rule>
+    <rule id="5" name="久堵后撤兜底">出现真实相持(≥2 车互堵)且某让行车持续让行超 _deadlock_timeout 时，
+      非"赢家"(优先级最高且 ns 最小)的车 _force_retreat：释放占用并后撤到自身段入口，打破对角路口相持。</rule>
+    <note kind="对齐说明">v2.0 文档曾提"抢占需占有者未物理进入"但代码未实现——v3.0 通过"物理在位者锁定 + 按序处理"
+      由构造保证该语义，已无该实现差异。</note>
+  </conflict-resolution-rules>
+
+  <!-- ============================================================ -->
+  <!-- 7. 核心算法流程                                              -->
+  <!-- ============================================================ -->
+  <algorithm>
+    <control-loop method="step" period-s="0.25" source="fleet_manager.py:step">
+      <phase order="1" call="run_agv(ns) for each ns" desc="各车状态机推进"/>
+      <phase order="2" call="apply_traffic_rules()"    desc="走廊段路权（冲突解决核心）"/>
+      <phase order="3" call="check_collisions()"        desc="碰撞检测（安全兜底，告警+报前端）"/>
+      <phase order="4" call="assign_tasks()"            desc="任务分配（让行中的车不参与）"/>
+    </control-loop>
+
+    <core method="apply_traffic_rules" source="fleet_manager.py:apply_traffic_rules" rebuild="每拍从零重建占用">
+      <step order="0">收集每台车的物理所在段 phys=detect_segments(pose) 与需求段 needed=phys ∪ 前瞻规划段；
+        充电中 / 已到待命点 / 无位姿的车不参与（本拍自动释放其占用）。</step>
+      <step order="1">先把"物理在位者"放入新占用表 new_occ（锁定，不可剥夺），首位占用者方向写入 new_dir。</step>
+      <step order="2">新进入者按 (优先级降序, ns 升序) 处理：want_new = needed 中尚未占有的段；
+        若 _can_admit 全部通过 → 原子提交占有；否则 block 记为首个进不去的段（一段不新占）。</step>
+      <step order="3">提交 self._segment_occupants = new_occ；self._segment_dir = new_dir。</step>
+      <step order="4">确定久堵兜底"赢家"= 让行车中 (优先级最高, ns 最小) 者。</step>
+      <step order="5">驱动让行/恢复（仅状态切换时改目标）：新进入让行→_enter_yield(去等待点)；
+        已让行且非赢家且超 _deadlock_timeout→_force_retreat；已让行且未超时→_resend_wait_if_stalled；
+        不再阻塞且超 _yield_min_dwell→_clear_yield + reissue_goal。</step>
+      <step order="6">退出 active 但仍标记让行的车 → _clear_yield 清理。</step>
+    </core>
+
+    <segment-detection>
+      <method name="detect_segments" input="pose(x,y)" output="包含该点的所有段名"/>
+      <method name="detect_segments_from_plan" input="plan_poses" output="前瞻 PLAN_LOOKAHEAD_M 米内路径穿过的段名"
+              note="按累计弧长截断，只预约近端路径，避免锁死整条走廊（消除 D5）"/>
+      <method name="_intended_dir" output="positive/negative/unknown"
+              note="优先用规划路径在段内净位移定向，无规划则回退 heading_direction(航向角)——接上原死代码(消除 D4)"/>
+    </segment-detection>
+  </algorithm>
+
+  <!-- ============================================================ -->
+  <!-- 8. 死锁与活性                                                -->
+  <!-- ============================================================ -->
+  <deadlock-prevention>
+    <mechanism name="禁止持有-等待 (I2)">让行车不持任何段 → 破坏死锁必要条件；单段及"先进入者占优"的竞争天然无死锁。</mechanism>
+    <mechanism name="确定性顺序 (I4)">按 (优先级, ns) 全序处理 → 不存在对等互让/抖动选主。</mechanism>
+    <mechanism name="物理在位者锁定 (I3)">不驱逐已在段内的车 → 不会因抢占把车逼入对撞。</mechanism>
+    <mechanism name="久堵后撤兜底 (rule 5)">残余的"对角路口双物理在位互堵"由非赢家强制后撤打破，保证活性。</mechanism>
+    <mechanism name="任务分配过滤">_yielding 中的车不参与新任务分配 → 不引入更多冲突。</mechanism>
+    <residual-risk severity="low" name="整侧段粒度的对角路口相持">
+      走廊为"贯穿整侧"的单一段，两车分别物理占据相邻两段并互需对方时会短暂相持；
+      已由"久堵后撤兜底"保证活性（最坏 _deadlock_timeout 秒后破解）。彻底消除需把长走廊细分为子段（见优化方案 B2/未来工作）。
+    </residual-risk>
+  </deadlock-prevention>
+
+  <!-- ============================================================ -->
+  <!-- 9. 数据结构与参数                                            -->
+  <!-- ============================================================ -->
+  <data-structures>
+    <field name="_segment_occupants" type="dict[str,list[str]]" desc="段名 -&gt; 占用车列表(同向可多车，顺序=进入先后)；每拍重建"/>
+    <field name="_segment_dir"       type="dict[str,str]"       desc="段名 -&gt; 'positive'/'negative' 当前通行方向"/>
+    <field name="_yielding"          type="set[str]"            desc="当前正在让行的车 ns"/>
+    <field name="_yield_blocked_seg" type="dict[str,str]"       desc="ns -&gt; 因哪个段而让行（前端等待队列显示）"/>
+    <field name="_wait_target"       type="dict[str,tuple]"     desc="ns -&gt; 当前让行/后撤等待点 (x,y)"/>
+    <field name="_wait_progress"     type="dict[str,dict]"      desc="ns -&gt; 去等待点的失速看护 {best_d,t}"/>
+    <field name="_yield_since"       type="dict[str,float]"     desc="ns -&gt; 进入让行时刻（迟滞 + 久堵计时）"/>
+    <field name="_zone_owner"        type="dict[str,str]"       desc="端点区域互斥：zone_name -&gt; ns（保留）"/>
+    <field name="_collisions"        type="list[dict]"          desc="当前碰撞/危险接近对 [{a,b,d}]（保留）"/>
+  </data-structures>
+
+  <parameters source="fleet_manager.py:__init__">
+    <param name="control loop period"   value="0.25" unit="s" desc="主循环 step() 周期"/>
+    <param name="SEGMENT_CAPACITY"      value="2"    unit="台" desc="每段同向最多车数(>1 允许跟车; =1 退化为单行互斥)"/>
+    <param name="PLAN_LOOKAHEAD_M"      value="4.0"  unit="m" desc="规划前瞻距离：只预约前方这段路径穿过的走廊段"/>
+    <param name="_yield_min_dwell"      value="0.5"  unit="s" desc="让行最短保持时长（迟滞，防边界抖动 1 拍来回切）"/>
+    <param name="_deadlock_timeout"     value="8.0"  unit="s" desc="让行久堵兜底：超时则非赢家车强制后撤"/>
+    <param name="collision_dist"        value="0.55" unit="m" desc="两车中心距小于此值视为碰撞/危险接近（车体半径0.30）"/>
+    <param name="standby_tol"           value="0.6"  unit="m" desc="到待命点/等待点容差"/>
+    <param name="_goal_resend_interval" value="12.0" unit="s" desc="朝目标(含等待点)无进展超此时长则重发"/>
+    <param name="_goal_progress_eps"    value="0.30" unit="m" desc="缩短此距离才算朝目标前进"/>
+  </parameters>
+
+  <!-- ============================================================ -->
+  <!-- 10. 与 Nav2 的分层协同                                       -->
+  <!-- ============================================================ -->
+  <nav2-integration>
+    <layer name="调度层(fleet_manager)" responsibility="是否放行 — 路权管理"/>
+    <layer name="导航层(Nav2)"          responsibility="怎么走 — 全局/局部路径规划 + 动态避障"/>
+    <layer name="运动层(DWB controller)" responsibility="如何控制 — 速度/角速度（同向跟车的车距由 costmap 维持）"/>
+    <mechanism note="路权系统不修改 Nav2，仅通过改写 /&lt;ns&gt;/goal_pose 目标点间接控制 AGV">
+      <action name="放行" goal="实际任务目标（取货点/卸货点/充电站）"/>
+      <action name="让行" goal="等待点目标（走廊入口安全位置）via send_goal_xy()"/>
+      <action name="后撤" goal="久堵兜底：自身段入口的后撤等待点"/>
+      <action name="恢复" goal="让行结束后 reissue_goal() 重发原任务目标"/>
+    </mechanism>
+  </nav2-integration>
+
+  <!-- ============================================================ -->
+  <!-- 11. Web 面板集成 (/fleet/state)                              -->
+  <!-- ============================================================ -->
+  <web-integration topic="/fleet/state" type="std_msgs/String(JSON)" rate="~3Hz">
+    <field name="segment_owner"     type="dict[str,str]"        desc="{段名: 首位占用者 ns} — 兼容旧前端(字符串)"/>
+    <field name="segment_occupants" type="dict[str,list[str]]"  desc="{段名: 全部占用车} — 同向多车的完整视图(新增)"/>
+    <field name="segment_dir"       type="dict[str,str]"        desc="{段名: 通行方向}(新增)"/>
+    <field name="segment_queue"     type="dict[str,list[str]]"  desc="{段名: 因该段而让行的车} — 等待视图"/>
+    <field name="yielding"          type="list[str]"            desc="正在让行（路权等待）的车"/>
+    <field name="collisions"        desc="当前碰撞/危险接近对 [{a,b,d}]"/>
+    <anomaly level="info" type="段等待" desc="AGV 因路权冲突在等待点停车，显示等待点坐标"/>
+  </web-integration>
+
+  <version-history>
+    <version id="1.0" date="2026-06" change="反应式优先级让行 + 原地停车"/>
+    <version id="1.1" date="2026-06" change="改为横向让到走廊内侧"/>
+    <version id="2.0" date="2026-06-19" change="走廊段预约制：前瞻预约 + 等待点 + 抢占 + 队列（存在 D1~D6 缺陷）"/>
+    <version id="3.0" date="2026-06-20" change="走廊段占用制重构：每拍重建 + 原子获取 + 禁止持有-等待 + 物理在位锁定 + 隐式抢占 + 同向共享 + 前瞻限距 + 等待点失速看护/互斥 + 久堵后撤兜底（修复 D1~D6）"/>
+  </version-history>
+
+</path-conflict-resolution>

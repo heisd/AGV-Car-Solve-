@@ -156,9 +156,10 @@ class FleetManager(Node):
         # 其它车进入其走廊段时需停车让行，待充电车通过后恢复。
         self._yielding: set = set()              # 当前正在让行的车 ns
 
-        # ---- 走廊段预约制路权系统 ----
-        # 仓库走廊划分为命名段，每段同一时刻只允许一台车通行（单行互斥）。
-        # AGV 进入走廊前须预约段；占用冲突时按优先级裁决，低优先级车在入口等待点停车。
+        # ---- 走廊段路权系统（每拍重建占用 · 原子获取 · 同向共享） ----
+        # 仓库走廊划分为命名段。每拍从零重建段占用：物理在段者锁定该段，新进入者
+        # 按优先级原子获取其全部需求段（拿不全则一段不占、退到入口等待点让行）。
+        # 同一段允许多台"同向"车跟车通行，仅对向/满载才互斥。详见 doc/right-of-way-design.md。
         self.CORRIDOR_SEGMENTS = {
             'corridor_east':      {'x_min': 4.5, 'x_max': 6.5, 'y_min': -6.5, 'y_max': 6.5},
             'corridor_west':      {'x_min': -6.5, 'x_max': -4.5, 'y_min': -6.5, 'y_max': 6.5},
@@ -166,21 +167,32 @@ class FleetManager(Node):
             'corridor_south':     {'x_min': -6.5, 'x_max': 6.5, 'y_min': -6.5, 'y_max': -4.5},
             'corridor_center_ns': {'x_min': -1.0, 'x_max': 1.0, 'y_min': -6.5, 'y_max': 6.5},
         }
-        self._segment_owner: dict = {}        # segment_name -> ns（段拥有者）
-        self._segment_queue: dict = {s: [] for s in self.CORRIDOR_SEGMENTS}  # 段等待队列
+        # 段占用：segment -> [ns]（同向可多车，列表顺序=进入先后）。每拍重建。
+        self._segment_occupants: dict = {s: [] for s in self.CORRIDOR_SEGMENTS}
+        self._segment_dir: dict = {}            # segment -> 'positive'/'negative'（当前通行方向）
+        self.SEGMENT_CAPACITY = 2               # 每段同向最多车数（>1 允许跟车；=1 退化为单行互斥）
+        self.PLAN_LOOKAHEAD_M = 4.0             # 规划前瞻距离(m)：只预约前方这段路径穿过的走廊段
+        # 等待点须落在"被让走廊之外"的相邻(垂直)走廊里：让行车停这里时不再是被让
+        # 走廊的占用者，从而不会因"驶到入口即成为该段在位者"而自我解除让行、来回横跳。
+        # 命名 corridor_<X>_<side> = 走廊 X 的 <side> 端口外侧(位于垂直走廊内)。
         self.WAIT_POINTS = {
-            'corridor_east_south':    (5.5, -6.0),
-            'corridor_east_north':    (5.5,  6.0),
-            'corridor_west_south':    (-5.5, -6.0),
-            'corridor_west_north':    (-5.5,  6.0),
-            'corridor_north_east':    (6.0,  5.5),
-            'corridor_north_west':    (-6.0, 5.5),
-            'corridor_south_east':    (6.0, -5.5),
-            'corridor_south_west':    (-6.0, -5.5),
-            'corridor_center_south':  (0.0, -6.0),
-            'corridor_center_north':  (0.0,  6.0),
+            'corridor_east_south':    (4.0, -5.5),   # 南走廊内，东走廊南口外
+            'corridor_east_north':    (4.0,  5.5),   # 北走廊内，东走廊北口外
+            'corridor_west_south':    (-4.0, -5.5),  # 南走廊内，西走廊南口外
+            'corridor_west_north':    (-4.0,  5.5),  # 北走廊内，西走廊北口外
+            'corridor_north_east':    (5.5,  4.0),   # 东走廊内，北走廊东口外
+            'corridor_north_west':    (-5.5, 4.0),   # 西走廊内，北走廊西口外
+            'corridor_south_east':    (5.5, -4.0),   # 东走廊内，南走廊东口外
+            'corridor_south_west':    (-5.5, -4.0),  # 西走廊内，南走廊西口外
+            'corridor_center_south':  (2.0, -5.5),   # 南走廊内，中央通道南口外
+            'corridor_center_north':  (2.0,  5.5),   # 北走廊内，中央通道北口外
         }
-        self._wait_target: dict = {}   # ns -> (x,y) 当前让行等待点目标
+        self._wait_target: dict = {}            # ns -> (x,y) 当前让行等待点目标
+        self._wait_progress: dict = {}          # ns -> 让行去等待点的失速看护 {'best_d','t'}
+        self._yield_blocked_seg: dict = {}      # ns -> 因哪个段而让行（前端"等待队列"显示）
+        self._yield_since: dict = {}            # ns -> 进入让行的时刻（迟滞 + 死锁兜底计时）
+        self._yield_min_dwell = 0.5             # s，让行最短保持时长（防边界抖动 1 拍来回切）
+        self._deadlock_timeout = 8.0            # s，让行久堵兜底：超时则非"赢家"车强制后撤
 
         # 碰撞检测：两车中心距 < collision_dist 视为碰撞/危险接近，
         # 边沿触发告警(WARN→Web异常日志)，并在 /fleet/state 发布当前碰撞对供前端显示。
@@ -297,12 +309,20 @@ class FleetManager(Node):
                 segs.append(name)
         return segs
 
-    def detect_segments_from_plan(self, plan_poses):
-        """返回规划路径 plan_poses 穿过的所有走廊段名列表。"""
+    def detect_segments_from_plan(self, plan_poses, max_ahead_m=None):
+        """返回规划路径"前瞻范围内"穿过的走廊段名列表。
+        只看车前方约 PLAN_LOOKAHEAD_M 米的路径，避免一占就锁住整条走廊（吞吐优化）。"""
         if not plan_poses:
             return []
+        limit = self.PLAN_LOOKAHEAD_M if max_ahead_m is None else max_ahead_m
         segs = set()
-        for p in plan_poses[::5]:
+        acc = 0.0
+        prev = plan_poses[0]
+        for p in plan_poses:
+            acc += math.hypot(p[0] - prev[0], p[1] - prev[1])
+            prev = p
+            if limit and acc > limit:
+                break
             for name, rect in self.CORRIDOR_SEGMENTS.items():
                 if rect['x_min'] <= p[0] <= rect['x_max'] and rect['y_min'] <= p[1] <= rect['y_max']:
                     segs.add(name)
@@ -318,66 +338,136 @@ class FleetManager(Node):
             return 'positive' if math.cos(yaw) > 0.3 else ('negative' if math.cos(yaw) < -0.3 else 'unknown')
         return 'unknown'
 
-    def try_reserve_segment(self, ns, segment_name):
-        """尝试预约走廊段。若无人占用或已被自己占用则成功；否则按优先级裁决。
-        高优先级车可抢占，低优先级车加入等待队列。返回 True 表示获得通行权。"""
-        owner = self._segment_owner.get(segment_name)
-        if owner is None or owner == ns:
-            self._segment_owner[segment_name] = ns
-            # 从等待队列移除（若之前排队的话）
-            if ns in self._segment_queue[segment_name]:
-                self._segment_queue[segment_name].remove(ns)
+    def _intended_dir(self, ns, segment_name):
+        """车在某走廊段的预期行进方向：优先用规划路径在段内的净位移判断，
+        无规划则回退到航向角（复用 heading_direction）。返回 positive/negative/unknown。"""
+        agv = self.agv[ns]
+        rect = self.CORRIDOR_SEGMENTS[segment_name]
+        axis = 1 if segment_name in ('corridor_east', 'corridor_west', 'corridor_center_ns') else 0
+        pts = [p for p in getattr(agv, 'plan_poses', [])
+               if rect['x_min'] <= p[0] <= rect['x_max'] and rect['y_min'] <= p[1] <= rect['y_max']]
+        if len(pts) >= 2:
+            delta = pts[-1][axis] - pts[0][axis]
+            if delta > 0.5:
+                return 'positive'
+            if delta < -0.5:
+                return 'negative'
+        return self.heading_direction(agv, segment_name)
+
+    def _can_admit(self, ns, segment_name, occ_map, dir_map):
+        """在本拍正在重建的占用状态 (occ_map/dir_map) 下，ns 能否进入 segment_name。
+        规则：空段可进；同向且未达容量可并入车队（跟车）；对向或满载则不可进。
+        注意：物理在位者已先行放入 occ_map，故任何车都无法挤走"已在段内"的车（安全第一）。"""
+        occ = occ_map[segment_name]
+        if ns in occ:
             return True
-        # 已被他车占用——按优先级裁决
-        my_pri = self.robot_priority(self.agv[ns])
-        owner_pri = self.robot_priority(self.agv[owner])
-        if my_pri > owner_pri:
-            # 高优先级抢占：原占有者被挤入等待队列
-            self._segment_owner[segment_name] = ns
-            if ns in self._segment_queue[segment_name]:
-                self._segment_queue[segment_name].remove(ns)
-            if owner not in self._segment_queue[segment_name]:
-                self._segment_queue[segment_name].insert(0, owner)
-            self.get_logger().info(
-                f"[{ns}] 优先级 {my_pri} > {owner_pri}，抢占走廊段 {segment_name}（{owner} 被挤入等待）。")
+        if not occ:
             return True
-        # 同优先级或低优先级：排队等待
-        if ns not in self._segment_queue[segment_name]:
-            self._segment_queue[segment_name].append(ns)
+        d = self._intended_dir(ns, segment_name)
+        if d != 'unknown' and dir_map.get(segment_name) == d and len(occ) < self.SEGMENT_CAPACITY:
+            return True
         return False
 
     def release_segments(self, ns, segment_name=None):
-        """释放 ns 持有的走廊段。segment_name=None 释放所有。"""
-        if segment_name:
-            if self._segment_owner.get(segment_name) == ns:
-                del self._segment_owner[segment_name]
-            if ns in self._segment_queue.get(segment_name, []):
-                self._segment_queue[segment_name].remove(ns)
-        else:
-            for seg in list(self._segment_owner):
-                if self._segment_owner[seg] == ns:
-                    del self._segment_owner[seg]
-            for q in self._segment_queue.values():
-                if ns in q:
-                    q.remove(ns)
-            if hasattr(self.agv[ns], 'plan_poses'):
-                self.agv[ns].plan_poses = []
-        # 同时清除让行等待点
-        self._wait_target.pop(ns, None)
+        """释放 ns 的走廊段占用与让行状态。segment_name=None 释放全部
+        （任务完成 / 充电 / 回到待命点时调用）。"""
+        segs = [segment_name] if segment_name else list(self._segment_occupants)
+        for s in segs:
+            occ = self._segment_occupants.get(s, [])
+            if ns in occ:
+                occ.remove(ns)
+            if not occ:
+                self._segment_dir.pop(s, None)
+        if segment_name is None and hasattr(self.agv[ns], 'plan_poses'):
+            self.agv[ns].plan_poses = []
+        self._clear_yield(ns)
 
-    def promote_waiting(self):
-        """段释放后，将等待队列队首提升为新的段拥有者。"""
-        for seg_name, queue in self._segment_queue.items():
-            if seg_name not in self._segment_owner and queue:
-                promoted_ns = queue.pop(0)
-                self._segment_owner[seg_name] = promoted_ns
-                self.get_logger().info(
-                    f"[{promoted_ns}] 走廊段 {seg_name} 已释放，从等待队列提升为拥有者 → 恢复行驶。")
-                # 清除让行状态，恢复原导航目标
-                if promoted_ns in self._yielding:
-                    self._yielding.discard(promoted_ns)
-                    self._wait_target.pop(promoted_ns, None)
-                    self.reissue_goal(promoted_ns)
+    def _enter_yield(self, ns, blocked_seg):
+        """让 ns 进入让行状态：记录被挡段，发往最近且未被占用的等待点。"""
+        self._yielding.add(ns)
+        self._yield_blocked_seg[ns] = blocked_seg
+        self._yield_since[ns] = time.time()
+        self._wait_progress[ns] = None
+        wp = self.nearest_wait_point(ns, blocked_seg)
+        if wp:
+            self._wait_target[ns] = wp
+            self.send_goal_xy(ns, wp)
+            self.get_logger().warn(
+                f"[{ns}] 走廊段 {blocked_seg} 冲突 → 让行至等待点 ({wp[0]:.1f},{wp[1]:.1f})。")
+        else:
+            self.get_logger().warn(f"[{ns}] 走廊段 {blocked_seg} 冲突，未找到合适等待点。")
+
+    def _clear_yield(self, ns):
+        """解除 ns 的让行状态（不主动下发目标，由调用方决定是否 reissue）。"""
+        self._yielding.discard(ns)
+        self._yield_blocked_seg.pop(ns, None)
+        self._wait_target.pop(ns, None)
+        self._wait_progress.pop(ns, None)
+        self._yield_since.pop(ns, None)
+
+    def _resend_wait_if_stalled(self, ns):
+        """让行车若长时间到不了等待点（Nav2 中止/失速），重发等待点目标。"""
+        wp = self._wait_target.get(ns)
+        agv = self.agv[ns]
+        if not wp or agv.pose is None:
+            return
+        d = dist(agv.pose, wp)
+        if d <= self.standby_tol:
+            return
+        now = time.time()
+        prog = self._wait_progress.get(ns)
+        if prog is None:
+            self._wait_progress[ns] = {'best_d': d, 't': now}
+            return
+        if d < prog['best_d'] - self._goal_progress_eps:
+            prog['best_d'] = d
+            prog['t'] = now
+            return
+        if now - prog['t'] >= self._goal_resend_interval:
+            self.send_goal_xy(ns, wp)
+            prog['t'] = now
+            self.get_logger().warn(
+                f"[{ns}] 让行去等待点 {self._goal_resend_interval:.0f}s 无进展 → 重发。")
+
+    def _force_retreat(self, ns):
+        """死锁/久堵兜底：让 ns 彻底退出当前走廊段（释放占用 + 后撤到自身段入口），
+        给"赢家"车让出整条通路，打破对角路口的相持。"""
+        for s, occ in self._segment_occupants.items():
+            if ns in occ:
+                occ.remove(ns)
+                if not occ:
+                    self._segment_dir.pop(s, None)
+        wp = self._retreat_wait_point(ns)
+        if wp:
+            self._wait_target[ns] = wp
+            self.send_goal_xy(ns, wp)
+        self._yield_since[ns] = time.time()      # 重置计时，给后撤动作留时间
+        self.get_logger().warn(
+            f"[{ns}] 路权久堵({self._deadlock_timeout:.0f}s) → 强制后撤让路。")
+
+    def _retreat_wait_point(self, ns):
+        """选 ns 当前所在段的等待点中、离"被挡段"最远的那个（即向后撤离方向）。"""
+        agv = self.agv[ns]
+        if agv.pose is None:
+            return None
+        my_segs = self.detect_segments(agv.pose)
+        cands = [xy for seg in my_segs for name, xy in self.WAIT_POINTS.items()
+                 if name.startswith(seg)]
+        if not cands:
+            cands = list(self.WAIT_POINTS.values())
+        blocked = self._yield_blocked_seg.get(ns)
+        if blocked and blocked in self.CORRIDOR_SEGMENTS:
+            r = self.CORRIDOR_SEGMENTS[blocked]
+            bc = ((r['x_min'] + r['x_max']) / 2.0, (r['y_min'] + r['y_max']) / 2.0)
+            return max(cands, key=lambda xy: dist(xy, bc))
+        return min(cands, key=lambda xy: dist(agv.pose, xy))
+
+    def _segment_waiters(self):
+        """{段名: [因该段而让行的车]} —— 供前端"等待队列"列显示。"""
+        out = {}
+        for ns, seg in self._yield_blocked_seg.items():
+            out.setdefault(seg, []).append(ns)
+        return out
 
     def nearest_wait_point(self, ns, segment_name):
         """为 ns 在指定走廊段找到最近的等待点，让车停在段入口外等候。
@@ -393,8 +483,8 @@ class FleetManager(Node):
             # fallback：所有等待点中找最近的
             candidates = list(self.WAIT_POINTS.items())
 
-        owner = self._segment_owner.get(segment_name)
-        owner_pose = self.agv[owner].pose if (owner and owner != ns) else None
+        others = [o for o in self._segment_occupants.get(segment_name, []) if o != ns]
+        owner_pose = self.agv[others[0]].pose if (others and self.agv[others[0]].pose) else None
 
         valid_candidates = []
         if owner_pose:
@@ -421,73 +511,105 @@ class FleetManager(Node):
         if not valid_candidates:
             valid_candidates = candidates
 
+        # 等待点互斥：剔除已被其他让行车占用/锁定的等待点，避免两车挤同一点相撞。
+        claimed = [t for n2, t in self._wait_target.items() if n2 != ns]
         best_wp = None
         best_d = float('inf')
         for wp_name, wp_xy in valid_candidates:
+            if any(dist(wp_xy, c) <= self.standby_tol for c in claimed):
+                continue
             d = dist(agv.pose, wp_xy)
             if d < best_d:
                 best_d = d
                 best_wp = wp_xy
+        if best_wp is None:        # 候选都被占 → 退回不排除占用的最近点
+            for wp_name, wp_xy in valid_candidates:
+                d = dist(agv.pose, wp_xy)
+                if d < best_d:
+                    best_d = d
+                    best_wp = wp_xy
         return best_wp
 
     def apply_traffic_rules(self):
-        """走廊段预约制路权（防撞核心）：每个走廊段同一时刻仅允许一台车通行。
-        AGV 进入走廊段前须预约，占用冲突时按任务优先级裁决，低优先级车在
-        段入口等待点停车让行，待高优先级车驶离后恢复——充电车优先级最高。
-        相比旧版基于半径的让行，段预约制可在车尚未接近时就确定性地互斥，
-        彻底避免窄道相遇/对向死锁。"""
-        # 1. 每台正在导航的车：检测所在/即将进入的走廊段并预约
+        """走廊段路权（防撞核心）。每拍从零重建段占用，保证四条不变量：
+          1) 原子获取——一台车要么拿到它需要的全部段，要么一段都不新占（杜绝
+             "拿到一段、为另一段让行"导致的同 tick 决策互相覆盖与持有-等待死锁）；
+          2) 禁止持有-等待——让行车不新占任何段，破坏死锁必要条件；
+          3) 物理在位者绝对优先——已物理处于某段的车在本拍锁定该段，任何车（即便
+             更高优先级）都不能挤走它（安全第一，避免段内对撞）；
+          4) 隐式优先级抢占——按 (优先级降序, ns 升序) 处理新进入者：高优先级车先选段，
+             低优先级车遇占用则在入口等待点让行，无需显式驱逐已入段的车。
+        同向共享：同一段允许 SEGMENT_CAPACITY 台同向车跟车通行，仅对向/满载才互斥。
+        详见 doc/right-of-way-design.md 与 doc/path-conflict-resolution.xml。"""
+        # 0) 收集每台车的物理所在段 phys 与需求段 needed(=物理 + 前瞻规划)
+        phys, needed, active = {}, {}, []
         for ns in self.ns_list:
             agv = self.agv[ns]
             if agv.pose is None:
-                continue
-            # 空闲且已在待命点的车不参与段预约（避免长期占用走廊）
+                continue                       # 无位姿 → 不参与，本拍自动释放其占用
             home = self.home.get(ns)
-            if agv.state == 'IDLE' and home and dist(agv.pose, home) <= self.standby_tol:
-                self.release_segments(ns)
-                continue
-            # 充电中的车不需要占用走廊段
-            if agv.state == 'CHARGING':
-                self.release_segments(ns)
-                continue
+            at_home = (agv.state == 'IDLE' and home is not None
+                       and dist(agv.pose, home) <= self.standby_tol)
+            if agv.state == 'CHARGING' or at_home:
+                continue                       # 充电中/已到待命点 → 不占用走廊
+            p = set(self.detect_segments(agv.pose))
+            phys[ns] = p
+            needed[ns] = p | set(self.detect_segments_from_plan(getattr(agv, 'plan_poses', [])))
+            active.append(ns)
 
-            plan_segs = self.detect_segments_from_plan(getattr(agv, 'plan_poses', []))
-            current_segs = list(set(self.detect_segments(agv.pose) + plan_segs))
+        # 1) 先把"物理在位者"放入新占用表（锁定，不可被剥夺）
+        new_occ = {s: [] for s in self.CORRIDOR_SEGMENTS}
+        new_dir = {}
+        for ns in active:
+            for s in phys[ns]:
+                if not new_occ[s]:
+                    new_dir[s] = self._intended_dir(ns, s)
+                new_occ[s].append(ns)
 
-            # 释放已驶离的段
-            owned_segs = [seg for seg, owner in list(self._segment_owner.items()) if owner == ns]
-            for seg in owned_segs:
-                if seg not in current_segs:
-                    self.release_segments(ns, seg)
-                    self.get_logger().info(
-                        f"[{ns}] 驶离走廊段 {seg} → 释放。")
+        # 2) 新进入者按 (优先级降序, ns 升序) 原子获取需求段；拿不全则一段不占 → 让行
+        order = sorted(active, key=lambda n: (-self.robot_priority(self.agv[n]), n))
+        block_of = {}
+        for ns in order:
+            want_new = [s for s in needed[ns] if ns not in new_occ[s]]
+            block = next((s for s in want_new
+                          if not self._can_admit(ns, s, new_occ, new_dir)), None)
+            if block is None:
+                for s in want_new:             # 原子提交：全部进入
+                    if not new_occ[s]:
+                        new_dir[s] = self._intended_dir(ns, s)
+                    new_occ[s].append(ns)
+            block_of[ns] = block               # block 非空 = 禁止持有-等待，一段不新占
 
-            # 尝试预约当前所在的段
-            for seg in current_segs:
-                if self.try_reserve_segment(ns, seg):
-                    # 预约成功：若之前在让行，解除让行并恢复原目标
-                    if ns in self._yielding:
-                        self._yielding.discard(ns)
-                        self._wait_target.pop(ns, None)
-                        self.reissue_goal(ns)
-                        self.get_logger().info(f"[{ns}] 段 {seg} 预约成功 → 恢复行驶。")
+        # 3) 提交占用状态
+        self._segment_occupants = new_occ
+        self._segment_dir = new_dir
+
+        # 4) 久堵兜底：让行过久者后撤；全局"赢家"(优先级最高且 ns 最小) 坚守不退
+        yielders = [n for n in active if block_of[n] is not None]
+        winner = min(yielders, key=lambda n: (-self.robot_priority(self.agv[n]), n)) if yielders else None
+
+        # 5) 驱动让行/恢复（仅在状态切换时改目标，避免刷 goal）
+        now = time.time()
+        for ns in active:
+            block = block_of[ns]
+            if block is not None:
+                if ns not in self._yielding:
+                    self._enter_yield(ns, block)
+                elif ns != winner and now - self._yield_since.get(ns, now) >= self._deadlock_timeout:
+                    self._force_retreat(ns)
                 else:
-                    # 预约失败：让行，停在最近等待点
-                    if ns not in self._yielding:
-                        self._yielding.add(ns)
-                        wp = self.nearest_wait_point(ns, seg)
-                        if wp:
-                            self._wait_target[ns] = wp
-                            self.send_goal_xy(ns, wp)
-                            self.get_logger().warn(
-                                f"[{ns}] 走廊段 {seg} 被 {self._segment_owner.get(seg)} 占用 → "
-                                f"让行至等待点 ({wp[0]:.1f},{wp[1]:.1f})。")
-                        else:
-                            self.get_logger().warn(
-                                f"[{ns}] 走廊段 {seg} 被占用，未找到合适等待点。")
+                    self._yield_blocked_seg[ns] = block      # 更新被挡段（用于前端显示）
+                    self._resend_wait_if_stalled(ns)
+            elif ns in self._yielding:
+                # 迟滞：让行最短保持 _yield_min_dwell，防边界抖动 1 拍来回切
+                if now - self._yield_since.get(ns, 0.0) >= self._yield_min_dwell:
+                    self._clear_yield(ns)
+                    self.reissue_goal(ns)
 
-        # 2. 队列提升：段释放后把排队等候的车提升为拥有者
-        self.promote_waiting()
+        # 6) 已退出 active（充电/到家/失位）但仍标记让行的车 → 清理
+        for ns in list(self._yielding):
+            if ns not in active:
+                self._clear_yield(ns)
 
     def reissue_goal(self, ns):
         """让行结束后，按当前状态重新下发目标。"""
@@ -893,8 +1015,12 @@ class FleetManager(Node):
             'zones': zones,
             'charger_zones': self.charger_zone_names,
             'zone_owner': dict(self._zone_owner),   # zone_name -> ns（区域预约，防撞可视化）
-            'segment_owner': dict(self._segment_owner),   # 走廊段拥有者
-            'segment_queue': {s: list(q) for s, q in self._segment_queue.items() if q},  # 走廊段等待队列
+            # 走廊段占用（同向可多车）：segment_owner 取首位占用者(兼容旧前端=字符串)，
+            # segment_occupants 给全量占用，segment_dir 给方向，segment_queue 给"正等待该段"的让行车。
+            'segment_owner': {s: lst[0] for s, lst in self._segment_occupants.items() if lst},
+            'segment_occupants': {s: list(lst) for s, lst in self._segment_occupants.items() if lst},
+            'segment_dir': dict(self._segment_dir),
+            'segment_queue': self._segment_waiters(),   # 走廊段等待车（因该段而让行）
             'tasks': tasks,                         # 任务分配总览
             'idle_agvs': idle_agvs,                 # 空闲车列表（"是否有空闲小车"）
             'yielding': sorted(self._yielding),     # 路权等待中的车（走廊段冲突）

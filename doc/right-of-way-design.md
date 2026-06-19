@@ -1,8 +1,10 @@
 # 多 AGV 仓库路权系统设计文档
 
-> 版本：v2.0 — 走廊段预约制路权  
-> 更新日期：2026-06-19  
+> 版本：v3.0 — 走廊段占用制路权（每拍重建·原子获取·同向共享）  
+> 更新日期：2026-06-20  
 > 适用于：GazeboLib 仓库仿真项目（ROS2 Humble + Nav2 + Gazebo Classic）
+>
+> 算法已于 v3.0 重构；最新结构化规格见 [`path-conflict-resolution.xml`](path-conflict-resolution.xml)，审查与优化记录见 [`path-conflict-optimization-plan.md`](path-conflict-optimization-plan.md)。
 
 ---
 
@@ -154,23 +156,27 @@ def step(self):                    # 250ms 主循环
 
 ## 4. 等待点定义
 
-当 AGV 因路权冲突需要让行时，不再"原地停车"（会堵路），而是驶向走廊入口处的
-**指定等待点**——安全、不阻挡主通道。
+当 AGV 因路权冲突需要让行时，不再"原地停车"（会堵路），而是驶向**指定等待点**。
+
+> **关键约束（v3.0 修正）**：等待点必须落在**被让走廊之外**的相邻(垂直)走廊里。
+> 否则让行车一驶到入口就成为被让走廊的物理在位者 → 按 I3 自动解除让行 → 再次尝试进入 →
+> 再让行，**来回横跳**且不前进（2 车整机回归实测到此现象）。因此每个 `corridor_<X>_<side>`
+> 等待点放在走廊 X 的 <side> 端口**外侧**（位于与之垂直的走廊内）。
 
 ### 4.1 等待点列表
 
 | 等待点名称 | 坐标 (x, y) | 所属走廊 | 位置描述 |
 |-----------|-------------|---------|----------|
-| `corridor_east_south` | (5.5, -6.0) | 东走廊 | 东走廊南端入口 |
-| `corridor_east_north` | (5.5, 6.0) | 东走廊 | 东走廊北端入口 |
-| `corridor_west_south` | (-5.5, -6.0) | 西走廊 | 西走廊南端入口 |
-| `corridor_west_north` | (-5.5, 6.0) | 西走廊 | 西走廊北端入口 |
-| `corridor_north_east` | (6.0, 5.5) | 北走廊 | 北走廊东端入口 |
-| `corridor_north_west` | (-6.0, 5.5) | 北走廊 | 北走廊西端入口 |
-| `corridor_south_east` | (6.0, -5.5) | 南走廊 | 南走廊东端入口 |
-| `corridor_south_west` | (-6.0, -5.5) | 南走廊 | 南走廊西端入口 |
-| `corridor_center_south` | (0.0, -6.0) | 中央通道 | 中央通道南端入口 |
-| `corridor_center_north` | (0.0, 6.0) | 中央通道 | 中央通道北端入口 |
+| `corridor_east_south` | (4.0, -5.5) | 东走廊 | 东走廊南口外（位于南走廊内） |
+| `corridor_east_north` | (4.0, 5.5) | 东走廊 | 东走廊北口外（位于北走廊内） |
+| `corridor_west_south` | (-4.0, -5.5) | 西走廊 | 西走廊南口外（位于南走廊内） |
+| `corridor_west_north` | (-4.0, 5.5) | 西走廊 | 西走廊北口外（位于北走廊内） |
+| `corridor_north_east` | (5.5, 4.0) | 北走廊 | 北走廊东口外（位于东走廊内） |
+| `corridor_north_west` | (-5.5, 4.0) | 北走廊 | 北走廊西口外（位于西走廊内） |
+| `corridor_south_east` | (5.5, -4.0) | 南走廊 | 南走廊东口外（位于东走廊内） |
+| `corridor_south_west` | (-5.5, -4.0) | 南走廊 | 南走廊西口外（位于西走廊内） |
+| `corridor_center_south` | (2.0, -5.5) | 中央通道 | 中央通道南口外（位于南走廊内） |
+| `corridor_center_north` | (2.0, 5.5) | 中央通道 | 中央通道北口外（位于北走廊内） |
 
 ### 4.2 等待点选择策略
 
@@ -198,19 +204,22 @@ nearest_wait_point(ns, segment_name):
 ### 5.2 冲突裁决规则
 
 ```
-规则 1（优先级裁决）：
-    优先级高者获得段路权，低者在等待点让行
+规则 1（物理在位锁定）：
+    物理已在段内的车本拍无条件锁定该段，任何车（即便更高优先级）都不能挤走它（安全第一）
 
-规则 2（同级裁决 — 防死锁）：
-    优先级相同时，按 ns 字典序小者优先
-    （如 agv1 < agv2 < agv3，确定且唯一，避免双方互让导致死锁）
+规则 2（优先级 + 同级裁决）：
+    新进入者按 (优先级降序, ns 升序) 处理；同级按 ns 字典序（agv1 < agv2 < agv3）
+    确定且唯一，不存在对等互让
 
-规则 3（抢占规则）：
-    高优先级车可抢占段路权，前提是原占有者尚未物理进入该段
-    （已在段内的车不可被强制驱逐，安全第一）
+规则 3（原子获取 + 隐式抢占）：
+    一台车要么拿到需要的全部段、要么一段都不新占；高优先级车被先处理即先得段，
+    低优先级随后遇占用即让行——无需显式驱逐已入段的车
 
-规则 4（段离开检测）：
-    AGV 离开段后自动释放预约 → 等待队列首车自动获得路权
+规则 4（同向共享）：
+    同一段允许 SEGMENT_CAPACITY 台同向车跟车通行，仅对向/满载才互斥
+
+规则 5（久堵后撤）：
+    出现真实相持(≥2 车互堵)且让行超 _deadlock_timeout 时，非"赢家"车释放占用并后撤，打破相持
 ```
 
 ---
@@ -231,59 +240,56 @@ nearest_wait_point(ns, segment_name):
        if AGV not physically in this segment anymore:
            release_segment(ns, segment_name)
        
-3. 段预约与冲突处理
-   for each AGV that is actively navigating:
-       for each segment the AGV is currently in:
-           if try_reserve_segment(ns, segment) succeeds:
-               if AGV was yielding → clear yield, reissue_goal
-           else:
-               send AGV to nearest_wait_point
-               add to _yielding set
-               log conflict
+3. 重建占用（物理在位者锁定）
+   new_occ = {seg: []}
+   for each active AGV:
+       for seg in detect_segments(agv.pose):   # 物理在段者本拍锁定该段
+           new_occ[seg].append(ns)
 
-4. 等待队列推进
-   promote_waiting()  # 段空闲后，队首车获得路权
+4. 新进入者按 (优先级降序, ns 升序) 原子获取
+   for ns in sorted(active, key=(-priority, ns)):
+       want_new = needed[ns] 中尚未占有的段
+       if 每个 want_new 段都 _can_admit:        # 原子：全有或全无
+           全部加入 new_occ（提交）
+       else:
+           标记让行（一段都不新占 → 禁止持有-等待）
 
 5. 清理不再需要让行的车
    for each AGV in _yielding:
        if no longer blocked → clear yield, reissue_goal
 ```
 
-### 6.2 段预约算法 `try_reserve_segment()`
+### 6.2 可进入判定 `_can_admit()`
 
 ```
-输入: ns (请求车), segment_name (目标段)
-输出: True (获得路权) / False (需等待)
+输入: ns, segment_name, 本拍正在重建的 occ_map/dir_map
+输出: True (可进入) / False (需让行)
 
-if 段无人占有 or 已被自己占有:
-    设 _segment_owner[segment] = ns
-    return True
+occ = occ_map[segment]
+if ns in occ:            return True   # 已在该段
+if occ 为空:             return True   # 空段可进
+d = _intended_dir(ns, segment)         # 规划净位移定向，回退航向角
+if d 已知 and dir_map[segment] == d and len(occ) < SEGMENT_CAPACITY:
+    return True                        # 同向且未满 → 并入车队(跟车)
+return False                           # 对向 / 满载 → 让行
 
-owner = 段当前占有者
-p_self = robot_priority(请求车)
-p_owner = robot_priority(占有者)
-
-if p_self > p_owner:
-    if 占有者不在段内(尚未物理进入):
-        抢占: _segment_owner[segment] = ns
-        log "路权抢占"
-        return True
-
-将请求车加入 _segment_queue[segment] 等待队列
-return False
+注：物理在位者已先行放入 occ_map，故任何车都无法挤走"已在段内"的车。
 ```
 
-### 6.3 等待队列推进 `promote_waiting()`
+### 6.3 让行驱动与久堵后撤（替代旧的队列推进）
 
 ```
-for each segment:
-    if segment has no owner AND queue is not empty:
-        promoted = queue.pop(0)  # 取队首
-        _segment_owner[segment] = promoted
-        if promoted in _yielding:
-            _yielding.remove(promoted)
-            reissue_goal(promoted)
-        log "等待结束，获得路权"
+每拍重建占用后（无持久队列），按状态切换驱动目标：
+
+winner = 让行车中 (优先级最高, ns 最小) 者
+for ns in active:
+    if 本拍被挡:
+        if 之前未让行:     _enter_yield(ns)   # 去最近且互斥的等待点
+        elif ns != winner and 让行已超 _deadlock_timeout:
+                           _force_retreat(ns) # 释放占用 + 后撤，打破相持
+        else:              _resend_wait_if_stalled(ns)  # 等待点失速看护
+    elif 之前在让行 and 让行已超 _yield_min_dwell(迟滞):
+                           _clear_yield(ns); reissue_goal(ns)  # 恢复原目标
 ```
 
 ---
@@ -303,10 +309,10 @@ for each segment:
 
 | 机制 | 说明 |
 |------|------|
-| **确定性优先级** | 优先级不同时有明确胜负；相同时按 ns 字典序 → 不存在"对等互让" |
-| **抢占规则** | 高优先级车可抢占未进入的段 → 打破等待链 |
-| **等待点分散** | 让行车退到走廊入口 → 不在走廊中间堵路 |
-| **段离开自动释放** | 车离开段后立即释放 → 不会长期占用 |
+| **禁止持有-等待** | 让行车不持任何段 → 破坏死锁必要条件（核心保证） |
+| **每拍重建 + 确定性顺序** | 按 (优先级, ns) 全序处理 → 无对等互让/抖动选主，无陈旧预约 |
+| **物理在位者锁定** | 不驱逐已在段内的车 → 不会因抢占把车逼入对撞 |
+| **久堵后撤兜底** | 残余的"对角路口双物理在位互堵"由非赢家强制后撤打破 → 保证活性 |
 | **任务分配过滤** | 让行中的车不参与新任务分配 → 不会引入更多冲突 |
 
 ### 7.3 与区域互斥的协同
@@ -324,25 +330,28 @@ for each segment:
 
 ## 8. 数据结构
 
-### 8.1 新增数据结构
+### 8.1 核心数据结构（v3.0）
 
 ```python
 # 走廊段定义
 CORRIDOR_SEGMENTS: dict[str, dict]
 # 例: {'corridor_east': {'x_min': 4.5, 'x_max': 6.5, 'y_min': -6.5, 'y_max': 6.5}}
 
-# 段拥有者映射
-_segment_owner: dict[str, str]      # segment_name -> ns
+# 段占用（同向可多车，列表顺序=进入先后）；每拍重建
+_segment_occupants: dict[str, list[str]]   # segment_name -> [ns, ...]
+_segment_dir: dict[str, str]               # segment_name -> 'positive'/'negative'
+SEGMENT_CAPACITY: int = 2                   # 每段同向最多车数
+PLAN_LOOKAHEAD_M: float = 4.0               # 规划前瞻限距(m)
 
-# 段等待队列
-_segment_queue: dict[str, list[str]]  # segment_name -> [ns1, ns2, ...]
-
-# 等待点定义
-WAIT_POINTS: dict[str, tuple[float, float]]  # wait_point_name -> (x, y)
-
-# 当前让行等待目标
-_wait_target: dict[str, tuple[float, float]]  # ns -> (x, y)
+# 等待点
+WAIT_POINTS: dict[str, tuple[float, float]] # name -> (x, y)
+_wait_target: dict[str, tuple]              # ns -> 当前让行/后撤等待点
+_wait_progress: dict[str, dict]             # ns -> 去等待点失速看护
+_yield_blocked_seg: dict[str, str]          # ns -> 因哪个段而让行
+_yield_since: dict[str, float]              # ns -> 进入让行时刻（迟滞 + 久堵计时）
 ```
+
+> 已移除 v2.0 的 `_segment_owner`（单拥有者）与 `_segment_queue`（等待队列）——每拍重建占用后不再需要持久预约/队列。
 
 ### 8.2 保留的数据结构
 
@@ -422,7 +431,8 @@ Nav2 只负责规划从当前位置到目标的路径。路权系统通过改变
 |------|------|------|
 | v1.0 | 2026-06 | 初始版本：反应式优先级让行 + 原地停车 |
 | v1.1 | 2026-06 | 修复：改为横向让到走廊内侧（`yield_pullaside_target`） |
-| **v2.0** | **2026-06-19** | **全面升级：走廊段预约制路权系统**（本文档） |
+| v2.0 | 2026-06-19 | 走廊段预约制路权系统（存在 D1~D6 实现缺陷，详见优化方案） |
+| **v3.0** | **2026-06-20** | **重构：走廊段占用制（每拍重建 + 原子获取 + 禁止持有-等待 + 物理在位锁定 + 隐式抢占 + 同向共享 + 久堵后撤），修复 D1~D6** |
 
 ### v2.0 关键改进
 
@@ -434,3 +444,14 @@ Nav2 只负责规划从当前位置到目标的路径。路权系统通过改变
 - ✅ 死锁预防（确定性优先级 + 抢占 + 分散等待）
 - ✅ Web 可视化（段占用 + 等待队列 + 段等待异常）
 - ✅ 与 Nav2/区域互斥/碰撞检测三层协同
+
+### v3.0 关键改进（修复 v2.0 的 D1~D6）
+
+- ✅ **每拍重建占用** → 杜绝陈旧预约与 set 顺序不确定（修 D1）
+- ✅ **原子获取 + 禁止持有-等待** → 根除路口循环等待死锁（修 D3）
+- ✅ **物理在位者锁定 + 隐式优先级抢占** → 安全抢占，绝不把车逼入段内对撞（修 D2）
+- ✅ **同向共享（接上 heading_direction）** → 同向跟车，吞吐回升（修 D4）
+- ✅ **规划前瞻限距 4m** → 不再一占锁死整侧走廊（修 D5）
+- ✅ **等待点失速看护 + 互斥 + 让行迟滞 + 状态原子化**（修 D6）
+- ✅ **久堵后撤兜底** → 残余对角路口相持的活性保证
+- ✅ rclpy 逻辑测试 21/21 通过（对头/同向/容量/路口无持有-等待/死锁后撤/载荷兼容）
