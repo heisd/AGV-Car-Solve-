@@ -21,6 +21,8 @@
   <main>
     <section class="panel map-panel">
       <div class="panel-title">仓库实时地图 <small>(俯视，单位 m · Nav2 路径)</small>
+        <small id="mapStatus" class="muted"></small>
+        <label class="map-toggle"><input type="checkbox" id="showRealMap" checked /> 真实地图(/map)</label>
         <span id="collisionBadge" class="collision-badge" style="display:none"></span>
       </div>
       <div id="collisionAlarm" class="collision-alarm" style="display:none"></div>

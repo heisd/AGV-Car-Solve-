@@ -38,6 +38,14 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    # Ensure ~/.gazebo/models is in GAZEBO_MODEL_PATH so Gazebo can find the models
+    gazebo_model_path = os.path.expanduser('~/.gazebo/models')
+    if 'GAZEBO_MODEL_PATH' in os.environ:
+        if gazebo_model_path not in os.environ['GAZEBO_MODEL_PATH'].split(os.pathsep):
+            os.environ['GAZEBO_MODEL_PATH'] += os.pathsep + gazebo_model_path
+    else:
+        os.environ['GAZEBO_MODEL_PATH'] = gazebo_model_path
+
     pkg_amr = get_package_share_directory('amr_description')
     default_world = os.path.join(pkg_amr, 'worlds', 'warehouse.world')
 

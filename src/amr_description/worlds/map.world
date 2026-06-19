@@ -1,6 +1,6 @@
 <?xml version="1.0" ?>
 <sdf version="1.6">
-  <world name="warehouse_world">
+  <world name="original_map">
     <!-- ===== Physics & Scene ===== -->
     <physics name="default_physics" type="ode">
       <max_step_size>0.001</max_step_size>

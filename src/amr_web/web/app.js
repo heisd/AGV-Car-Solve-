@@ -11,14 +11,89 @@
 // ---------------------------------------------------------------------------
 
 // ---- 仓库静态几何 (与 worlds/warehouse.world 一致) ----
-const WAREHOUSE = {
-  half: 7.0,                                   // 内墙半边长 (14x14m)
-  shelfXs: [-2, -1, 0, 1, 2],
-  shelfYs: [4.5, 1.5, -1.5, -4.5],
-  shelfSize: { x: 0.9, y: 0.4 },               // 开口朝 -Y，本体中心在 (x, y-0.2)
-  pickup: { cx: 5.5, cy: 5.5, sx: 2.5, sy: 2.5 },
-  charger: { cx: -5.5, cy: -5.5, sx: 2.0, sy: 2.0 },
+// ---- 仓库静态几何 (与 worlds/*.world 一致，根据运行场景动态加载) ----
+let currentWorldName = 'warehouse';
+let VIEW = 7.6;                                // 视野半边长 (m)
+
+const WORLD_LAYOUTS = {
+  'warehouse': {
+    half: 7.0,
+    view: 7.6,
+    shelfXs: [-2, -1, 0, 1, 2],
+    shelfYs: [4.5, 1.5, -1.5, -4.5],
+    shelfSize: { x: 0.9, y: 0.4 },               // 开口朝 -Y，本体中心在 (x, y-0.2)
+    pickup: { cx: 5.5, cy: 5.5, sx: 2.5, sy: 2.5 },
+    charger: { cx: -5.5, cy: -5.5, sx: 2.0, sy: 2.0 },
+    partitions: [],
+    decorations: []
+  },
+  'complex_warehouse': {
+    half: 8.0,
+    view: 8.6,
+    shelves: [
+      // NW shelves
+      { cx: -4, cy: 5, sx: 0.9, sy: 0.4 }, { cx: -3, cy: 5, sx: 0.9, sy: 0.4 }, { cx: -2, cy: 5, sx: 0.9, sy: 0.4 },
+      { cx: -4, cy: 3, sx: 0.9, sy: 0.4 }, { cx: -3, cy: 3, sx: 0.9, sy: 0.4 }, { cx: -2, cy: 3, sx: 0.9, sy: 0.4 },
+      // NE shelves
+      { cx: 2, cy: 5, sx: 0.9, sy: 0.4 }, { cx: 3, cy: 5, sx: 0.9, sy: 0.4 }, { cx: 4, cy: 5, sx: 0.9, sy: 0.4 },
+      { cx: 2, cy: 3, sx: 0.9, sy: 0.4 }, { cx: 3, cy: 3, sx: 0.9, sy: 0.4 }, { cx: 4, cy: 3, sx: 0.9, sy: 0.4 },
+      // SW shelves
+      { cx: -4, cy: -3, sx: 0.9, sy: 0.4 }, { cx: -3, cy: -3, sx: 0.9, sy: 0.4 }, { cx: -2, cy: -3, sx: 0.9, sy: 0.4 },
+      { cx: -4, cy: -5, sx: 0.9, sy: 0.4 }, { cx: -3, cy: -5, sx: 0.9, sy: 0.4 }, { cx: -2, cy: -5, sx: 0.9, sy: 0.4 },
+      // SE shelves
+      { cx: 2, cy: -3, sx: 0.9, sy: 0.4 }, { cx: 3, cy: -3, sx: 0.9, sy: 0.4 }, { cx: 4, cy: -3, sx: 0.9, sy: 0.4 },
+      { cx: 2, cy: -5, sx: 0.9, sy: 0.4 }, { cx: 3, cy: -5, sx: 0.9, sy: 0.4 }, { cx: 4, cy: -5, sx: 0.9, sy: 0.4 }
+    ],
+    partitions: [
+      { cx: 0, cy: 4, sx: 0.2, sy: 4.0, color: '#46566b' },
+      { cx: 0, cy: -4, sx: 0.2, sy: 4.0, color: '#46566b' }
+    ],
+    decorations: [
+      { cx: -6, cy: 0.5, sx: 0.8, sy: 2.0, color: '#2a3b4c', type: 'cabinet' },
+      { cx: 6, cy: -0.5, sx: 0.8, sy: 2.0, color: '#2a3b4c', type: 'cabinet' },
+      { cx: 0, cy: 0, sx: 1.2, sy: 0.8, color: '#3a4b5c', type: 'cart' }
+    ]
+  },
+  'warehouse_complex': {
+    half: 9.0,
+    view: 9.6,
+    shelves: [
+      // NW inner
+      { cx: -2.5, cy: 2.0, sx: 0.9, sy: 0.4 }, { cx: -2.5, cy: 3.2, sx: 0.9, sy: 0.4 }, { cx: -2.5, cy: 4.4, sx: 0.9, sy: 0.4 }, { cx: -2.5, cy: 5.6, sx: 0.9, sy: 0.4 },
+      // NE inner
+      { cx: 2.5, cy: 2.0, sx: 0.9, sy: 0.4 }, { cx: 2.5, cy: 3.2, sx: 0.9, sy: 0.4 }, { cx: 2.5, cy: 4.4, sx: 0.9, sy: 0.4 }, { cx: 2.5, cy: 5.6, sx: 0.9, sy: 0.4 },
+      // SW inner
+      { cx: -2.5, cy: -2.0, sx: 0.9, sy: 0.4 }, { cx: -2.5, cy: -3.2, sx: 0.9, sy: 0.4 }, { cx: -2.5, cy: -4.4, sx: 0.9, sy: 0.4 }, { cx: -2.5, cy: -5.6, sx: 0.9, sy: 0.4 },
+      // SE inner
+      { cx: 2.5, cy: -2.0, sx: 0.9, sy: 0.4 }, { cx: 2.5, cy: -3.2, sx: 0.9, sy: 0.4 }, { cx: 2.5, cy: -4.4, sx: 0.9, sy: 0.4 }, { cx: 2.5, cy: -5.6, sx: 0.9, sy: 0.4 }
+    ],
+    partitions: [
+      { cx: 0, cy: 0, sx: 0.2, sy: 8.0, color: '#46566b' },
+      { cx: 0, cy: 4.0, sx: 2.0, sy: 0.2, color: '#46566b' },
+      { cx: 0, cy: -4.0, sx: 2.0, sy: 0.2, color: '#46566b' }
+    ],
+    decorations: [
+      // Cabinets
+      { cx: -8.0, cy: 2.5, sx: 0.6, sy: 2.0, color: '#2a3b4c', type: 'cabinet' },
+      { cx: 8.0, cy: -2.5, sx: 0.6, sy: 2.0, color: '#2a3b4c', type: 'cabinet' },
+      // Carts
+      { cx: -8.0, cy: 0.0, sx: 1.0, sy: 0.7, color: '#3a4b5c', type: 'cart' },
+      { cx: 8.0, cy: 0.0, sx: 1.0, sy: 0.7, color: '#3a4b5c', type: 'cart' },
+      // Wooden Cases
+      { cx: -8.0, cy: -1.5, sx: 0.8, sy: 1.6, color: '#8b7355', type: 'box' },
+      { cx: 8.0, cy: 1.5, sx: 0.8, sy: 1.6, color: '#8b7355', type: 'box' }
+    ]
+  },
+  'map': {
+    half: 8.0,
+    view: 8.6,
+    shelves: [],
+    partitions: [],
+    decorations: []
+  }
 };
+
+let WAREHOUSE = WORLD_LAYOUTS[currentWorldName];
 
 const CORRIDOR_SEGMENTS = {
   'corridor_east':      { x_min: 4.5,  x_max: 6.5,  y_min: -6.5, y_max: 6.5 },
@@ -49,7 +124,6 @@ const ctx = canvas.getContext('2d');
 const SIZE = canvas.width;
 const PAD = 24;
 const SPAN = SIZE - 2 * PAD;
-const VIEW = 7.6;                              // 视野半边长 (m)
 const toX = (wx) => PAD + ((wx + VIEW) / (2 * VIEW)) * SPAN;
 const toY = (wy) => PAD + ((VIEW - wy) / (2 * VIEW)) * SPAN;
 const toL = (m) => (m / (2 * VIEW)) * SPAN;
@@ -71,33 +145,138 @@ function strokeRectC(cx, cy, w, h, color, dash) {
 
 let lastZones = null;
 let latestState = null;
+
+// ---- 真实占据栅格地图 (/<ns>/map, nav_msgs/OccupancyGrid) ----
+let mapBitmap = null;       // 离屏 canvas：渲染好的占据栅格（地图静态，只建一次）
+let mapMeta = null;         // {resolution, width, height, originX, originY}
+let showRealMap = true;     // true=显示真实 /map 栅格，false=硬编码示意图
+let mapSub = null;          // 当前 /map 的 ROSLIB.Topic
+let mapSubNs = null;        // 已订阅 map 的命名空间
+let mapRetryTimer = null;   // 未收到地图前的重订阅定时器（应对 nav2 错峰晚于浏览器订阅）
+let mapRetries = 0;         // 已重订阅次数
+let mapUseCbor = true;      // 先用 CBOR；多次失败后降级为无压缩（应对环境不支持 CBOR）
+let mapUnavailable = false; // 重试用尽仍无地图 -> 判定 /map 不可用，永久回退硬编码示意图
+const MAP_RETRY_MS = 4000;
+const MAP_MAX_RETRIES = 12;     // ~48s 仍拿不到 /map 即放弃，回退示意图
+const MAP_CBOR_ATTEMPTS = 3;    // 前 3 次用 CBOR，之后降级为无压缩
+
 const pathByNs = {};        // ns -> [{x,y}, ...]  最新 Nav2 全局规划
 const trailByNs = {};       // ns -> [[x,y], ...]  最近经过点（尾迹）
 const TRAIL_MAX = 50;
 let nsIndex = {};           // ns -> 颜色下标（与车队表一致）
 let selectedNs = null;      // 手动导航选中的车
 
+// nav_msgs/OccupancyGrid -> 离屏 canvas（一次性，地图静态）。
+// data 行优先、row0 在底部(原点处，+Y 向上)；图像 y0 在顶部，故按行翻转。
+function onMapMsg(msg) {
+  const info = msg.info;
+  const w = info.width, h = info.height;
+  if (!w || !h) return;
+  const data = msg.data;          // Int8: -1 未知 / 0 空闲 / 100 占据
+  const off = document.createElement('canvas');
+  off.width = w; off.height = h;
+  const octx = off.getContext('2d');
+  const img = octx.createImageData(w, h);
+  for (let row = 0; row < h; row++) {
+    const srcBase = row * w;
+    const dstBase = (h - 1 - row) * w;        // 行翻转
+    for (let col = 0; col < w; col++) {
+      const v = data[srcBase + col];
+      const di = (dstBase + col) * 4;
+      let r, g, b, a;
+      if (v < 0) {              // 未知 -> 透明（露出深色画布）
+        r = g = b = 0; a = 0;
+      } else if (v >= 65) {     // 占据（occupied_thresh 0.65）-> 墙体色
+        r = 91; g = 107; b = 130; a = 255;     // #5b6b82
+      } else {                  // 空闲 -> 地面色
+        r = 17; g = 22; b = 29; a = 255;       // #11161d
+      }
+      img.data[di] = r; img.data[di + 1] = g; img.data[di + 2] = b; img.data[di + 3] = a;
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  mapBitmap = off;
+  mapMeta = {
+    resolution: info.resolution,
+    width: w, height: h,
+    originX: info.origin.position.x,
+    originY: info.origin.position.y,
+  };
+  // 收到地图：停止重订阅、清除不可用标记
+  if (mapRetryTimer) { clearInterval(mapRetryTimer); mapRetryTimer = null; }
+  mapUnavailable = false;
+  updateMapStatus();
+  render();
+}
+
+// 把占据栅格离屏位图按世界坐标贴到主画布（左下角=origin，Y 翻转已在离屏处理）。
+function drawMap() {
+  if (!mapBitmap || !mapMeta) return;
+  const m = mapMeta;
+  const dx = toX(m.originX);                              // 左边界世界 x
+  const dy = toY(m.originY + m.height * m.resolution);    // 上边界世界 y
+  const dw = toL(m.width * m.resolution);
+  const dh = toL(m.height * m.resolution);
+  const prev = ctx.imageSmoothingEnabled;
+  ctx.imageSmoothingEnabled = false;                      // 栅格保持像素感，不模糊
+  ctx.drawImage(mapBitmap, dx, dy, dw, dh);
+  ctx.imageSmoothingEnabled = prev;
+}
+
 function drawStatic(zones) {
   ctx.clearRect(0, 0, SIZE, SIZE);
 
-  // 地面
-  fillRectC(0, 0, 2 * WAREHOUSE.half, 2 * WAREHOUSE.half, '#11161d');
-  // 外墙
-  strokeRectC(0, 0, 2 * WAREHOUSE.half, 2 * WAREHOUSE.half, '#46566b');
+  // 底图：有真实占据栅格且开关开启时用 /map，否则回退到硬编码示意图。
+  // 栅格已含墙体/货架等物理障碍，故此时跳过硬编码的地面/外墙/货架/隔断/装饰，避免重复。
+  const useMap = showRealMap && mapBitmap;
+  if (useMap) {
+    drawMap();
+  } else {
+    // 地面
+    fillRectC(0, 0, 2 * WAREHOUSE.half, 2 * WAREHOUSE.half, '#11161d');
+    // 外墙
+    strokeRectC(0, 0, 2 * WAREHOUSE.half, 2 * WAREHOUSE.half, '#46566b');
 
-  // 货架 (20 个)
-  for (const y of WAREHOUSE.shelfYs) {
-    for (const x of WAREHOUSE.shelfXs) {
-      fillRectC(x, y - WAREHOUSE.shelfSize.y / 2, WAREHOUSE.shelfSize.x, WAREHOUSE.shelfSize.y, '#8a6d3b');
+    // 货架
+    if (WAREHOUSE.shelves) {
+      for (const s of WAREHOUSE.shelves) {
+        fillRectC(s.cx, s.cy, s.sx, s.sy, '#8a6d3b');
+      }
+    } else if (WAREHOUSE.shelfYs && WAREHOUSE.shelfXs) {
+      for (const y of WAREHOUSE.shelfYs) {
+        for (const x of WAREHOUSE.shelfXs) {
+          fillRectC(x, y - WAREHOUSE.shelfSize.y / 2, WAREHOUSE.shelfSize.x, WAREHOUSE.shelfSize.y, '#8a6d3b');
+        }
+      }
+    }
+
+    // 隔断墙
+    if (WAREHOUSE.partitions) {
+      for (const p of WAREHOUSE.partitions) {
+        fillRectC(p.cx, p.cy, p.sx, p.sy, p.color || '#46566b');
+      }
+    }
+
+    // 辅助装饰物/柜子
+    if (WAREHOUSE.decorations) {
+      for (const d of WAREHOUSE.decorations) {
+        fillRectC(d.cx, d.cy, d.sx, d.sy, d.color);
+        strokeRectC(d.cx, d.cy, d.sx, d.sy, 'rgba(255,255,255,0.15)');
+      }
     }
   }
 
-  // 取货点 / 充电站（实体托盘/充电柜的位置示意）
-  const p = WAREHOUSE.pickup, c = WAREHOUSE.charger;
-  fillRectC(p.cx, p.cy, p.sx, p.sy, 'rgba(61,220,132,.18)');
-  strokeRectC(p.cx, p.cy, p.sx, p.sy, '#3ddc84');
-  fillRectC(c.cx, c.cy, c.sx, c.sy, 'rgba(255,167,51,.18)');
-  strokeRectC(c.cx, c.cy, c.sx, c.sy, '#ffa733');
+  // 取货点 / 充电站（实体托盘/充电柜的位置示意，仅限原版 warehouse）
+  if (WAREHOUSE.pickup) {
+    const p = WAREHOUSE.pickup;
+    fillRectC(p.cx, p.cy, p.sx, p.sy, 'rgba(61,220,132,.18)');
+    strokeRectC(p.cx, p.cy, p.sx, p.sy, '#3ddc84');
+  }
+  if (WAREHOUSE.charger) {
+    const c = WAREHOUSE.charger;
+    fillRectC(c.cx, c.cy, c.sx, c.sy, 'rgba(255,167,51,.18)');
+    strokeRectC(c.cx, c.cy, c.sx, c.sy, '#ffa733');
+  }
 
   // 调度区域 (来自 /fleet/state)：语义中心 + 可达接近点(gx,gy)
   if (zones) {
@@ -624,6 +803,8 @@ const statusEl = document.getElementById('status');
 const wsInput = document.getElementById('wsUrl');
 const addBtn = document.getElementById('addTaskBtn');
 const manualHint = document.getElementById('manualHint');
+const mapStatusEl = document.getElementById('mapStatus');
+const showRealMapEl = document.getElementById('showRealMap');
 
 wsInput.value = `ws://${location.hostname || 'localhost'}:9090`;
 
@@ -631,6 +812,23 @@ function setStatus(on, text) {
   statusEl.className = 'status ' + (on ? 'on' : 'off');
   statusEl.textContent = text;
   addBtn.disabled = !on;
+}
+
+// 地图加载状态提示 + 回退时禁用「真实地图」开关
+function updateMapStatus() {
+  if (!mapStatusEl) return;
+  if (mapUnavailable) {
+    mapStatusEl.textContent = '· /map 不可用，已回退示意图';
+    mapStatusEl.className = 'warn-text';
+    showRealMapEl.disabled = true;
+  } else if (!mapBitmap) {
+    mapStatusEl.textContent = '· 加载真实地图…';
+    mapStatusEl.className = 'muted';
+    showRealMapEl.disabled = false;
+  } else {
+    mapStatusEl.textContent = '';
+    showRealMapEl.disabled = false;
+  }
 }
 
 // 为每台车按需建立 /plan 订阅 与 /goal_pose 发布
@@ -654,12 +852,58 @@ function ensureRobotTopics(agvs) {
   });
 }
 
+// 订阅占据栅格地图。每车一套命名空间化 Nav2，map_server 发布的是 /<ns>/map（非全局 /map），
+// 各车共用同一张 warehouse_map.yaml，取首台车的命名空间即可。
+function ensureMapSub(ns) {
+  if (!ros || !ns || mapSubNs === ns) return;
+  mapSubNs = ns;
+  mapRetries = 0;
+  mapUseCbor = true;
+  mapUnavailable = false;
+  updateMapStatus();
+  subscribeMap();
+  // /map 是 latched(transient_local)：rosbridge 仅在订阅时已存在发布者才会匹配该 QoS。
+  // 但 nav2 错峰启动(12–36s)，浏览器可能先订阅 -> QoS 退化成 volatile 收不到。
+  // 故未拿到地图前每 4s 重订阅一次，触发 rosbridge 重新匹配 transient_local 并立刻补发 latched 帧。
+  if (mapRetryTimer) clearInterval(mapRetryTimer);
+  mapRetryTimer = setInterval(() => {
+    if (mapBitmap) { clearInterval(mapRetryTimer); mapRetryTimer = null; return; }
+    mapRetries++;
+    if (mapRetries >= MAP_CBOR_ATTEMPTS) mapUseCbor = false;   // CBOR 多次无果 -> 降级无压缩
+    if (mapRetries > MAP_MAX_RETRIES) {
+      // 回退机制：重试用尽仍拿不到 /map（话题不存在 / QoS 不匹配 / 解码失败等）
+      // -> 判定 /map 不可用，停止重试并永久回退到硬编码示意图。
+      clearInterval(mapRetryTimer); mapRetryTimer = null;
+      mapUnavailable = true;
+      if (mapSub) { try { mapSub.unsubscribe(); } catch (e) { /* ignore */ } mapSub = null; }
+      console.warn('[map] /' + mapSubNs + '/map 不可用，已回退到示意图');
+      updateMapStatus();
+      render();
+      return;
+    }
+    subscribeMap();
+  }, MAP_RETRY_MS);
+}
+
+function subscribeMap() {
+  if (!ros || !mapSubNs) return;
+  if (mapSub) { try { mapSub.unsubscribe(); } catch (e) { /* ignore */ } }
+  const opts = { ros, name: `/${mapSubNs}/map`, messageType: 'nav_msgs/OccupancyGrid' };
+  if (mapUseCbor) opts.compression = 'cbor';   // 栅格较大，CBOR 比 JSON 省带宽；不支持时降级无压缩
+  mapSub = new ROSLIB.Topic(opts);
+  mapSub.subscribe(onMapMsg);
+}
+
 function connect() {
   if (ros) { try { ros.close(); } catch (e) { /* ignore */ } }
   setStatus(false, '连接中…');
   // 重连时清空旧订阅缓存，避免引用已关闭的 ros 实例
   for (const k of Object.keys(pathSubByNs)) delete pathSubByNs[k];
   for (const k of Object.keys(goalPubByNs)) delete goalPubByNs[k];
+  // 复位地图订阅（保留已缓存的 mapBitmap，重连期间地图仍可显示）
+  if (mapRetryTimer) { clearInterval(mapRetryTimer); mapRetryTimer = null; }
+  mapSub = null; mapSubNs = null;
+  mapRetries = 0; mapUnavailable = false; updateMapStatus();
   ros = new ROSLIB.Ros({ url: wsInput.value.trim() });
 
   ros.on('connection', () => {
@@ -669,7 +913,17 @@ function connect() {
       let state;
       try { state = JSON.parse(msg.data); } catch (e) { return; }
       latestState = state;
+      
+      // 动态更新仓库世界底图及坐标范围
+      if (state.world_name && WORLD_LAYOUTS[state.world_name] && currentWorldName !== state.world_name) {
+        currentWorldName = state.world_name;
+        VIEW = WORLD_LAYOUTS[currentWorldName].view;
+        WAREHOUSE = WORLD_LAYOUTS[currentWorldName];
+        console.log("检测到地图场景切换: " + currentWorldName + ", VIEW缩放范围: " + VIEW);
+      }
+      
       ensureRobotTopics(state.agvs);
+      if (state.agvs && state.agvs.length) ensureMapSub(state.agvs[0].ns);
       // 累积尾迹
       state.agvs.forEach((a) => {
         if (a.x === null || a.y === null) return;
@@ -777,9 +1031,14 @@ function onMapClick(ev) {
 document.getElementById('connectBtn').addEventListener('click', connect);
 addBtn.addEventListener('click', submitTask);
 document.getElementById('showInfo').addEventListener('change', renderLogs);
+document.getElementById('showRealMap').addEventListener('change', (e) => {
+  showRealMap = e.target.checked;
+  render();
+});
 document.getElementById('clearLog').addEventListener('click', () => { logs.length = 0; renderLogs(); });
 canvas.addEventListener('click', onMapClick);
 
 updateManualHint();
+updateMapStatus();  // 初始化地图状态提示
 drawStatic(null);   // 先画静态仓库
 connect();          // 自动连接

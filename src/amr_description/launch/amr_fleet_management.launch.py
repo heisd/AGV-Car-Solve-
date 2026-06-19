@@ -41,6 +41,14 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def launch_setup(context, *args, **kwargs):
+    # Ensure ~/.gazebo/models is in GAZEBO_MODEL_PATH so Gazebo can find the models
+    gazebo_model_path = os.path.expanduser('~/.gazebo/models')
+    if 'GAZEBO_MODEL_PATH' in os.environ:
+        if gazebo_model_path not in os.environ['GAZEBO_MODEL_PATH'].split(os.pathsep):
+            os.environ['GAZEBO_MODEL_PATH'] += os.pathsep + gazebo_model_path
+    else:
+        os.environ['GAZEBO_MODEL_PATH'] = gazebo_model_path
+
     num_agvs = max(1, int(context.launch_configurations.get('num_agvs', '1')))
     launch_gazebo = context.launch_configurations.get('launch_gazebo', 'false').lower() == 'true'
 
@@ -284,6 +292,7 @@ def launch_setup(context, *args, **kwargs):
             'battery_low_threshold': 0.20,
             'battery_resume_threshold': 0.60,
             'goal_reach_dist': 0.25,
+            'world_file': 'map.world',
         }],
         output='screen',
         emulate_tty=True,

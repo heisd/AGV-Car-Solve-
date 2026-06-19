@@ -25,6 +25,14 @@ NS = 'agv1'
 
 
 def generate_launch_description():
+    # Ensure ~/.gazebo/models is in GAZEBO_MODEL_PATH so Gazebo can find the models
+    gazebo_model_path = os.path.expanduser('~/.gazebo/models')
+    if 'GAZEBO_MODEL_PATH' in os.environ:
+        if gazebo_model_path not in os.environ['GAZEBO_MODEL_PATH'].split(os.pathsep):
+            os.environ['GAZEBO_MODEL_PATH'] += os.pathsep + gazebo_model_path
+    else:
+        os.environ['GAZEBO_MODEL_PATH'] = gazebo_model_path
+
     pkg_amr = FindPackageShare('amr_description')
     pkg_amr_dir = get_package_share_directory('amr_description')
 
@@ -43,7 +51,7 @@ def generate_launch_description():
 
     xacro_file = PathJoinSubstitution([pkg_amr, 'urdf', 'amr.urdf.xacro'])
     robot_description = Command(['xacro ', xacro_file, ' namespace:=', NS])
-
+    # 默认使用Origin Map 进行建图，若需要使用其他地图进行建图，请将地图文件放在amr_description/worlds目录下，并修改default_world的路径
     default_world = os.path.join(pkg_amr_dir, 'worlds', 'map.world')
     world = LaunchConfiguration('world')
 

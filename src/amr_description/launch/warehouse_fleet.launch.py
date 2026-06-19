@@ -38,6 +38,14 @@ CHARGER_XY = [-5.5, -5.5]   # 充电站坐标（charger_dock_monitor 用）
 
 
 def generate_launch_description():
+    # Ensure ~/.gazebo/models is in GAZEBO_MODEL_PATH so Gazebo can find the models
+    gazebo_model_path = os.path.expanduser('~/.gazebo/models')
+    if 'GAZEBO_MODEL_PATH' in os.environ:
+        if gazebo_model_path not in os.environ['GAZEBO_MODEL_PATH'].split(os.pathsep):
+            os.environ['GAZEBO_MODEL_PATH'] += os.pathsep + gazebo_model_path
+    else:
+        os.environ['GAZEBO_MODEL_PATH'] = gazebo_model_path
+
     pkg_amr = get_package_share_directory('amr_description')
     pkg_web = get_package_share_directory('amr_web')
 
@@ -142,6 +150,7 @@ def generate_launch_description():
             'battery_resume_threshold': 0.60,
             'goal_reach_dist': 0.30,
             'require_nav_ready': False,
+            'world_file': world,
         }],
         output='screen', emulate_tty=True,
     ))

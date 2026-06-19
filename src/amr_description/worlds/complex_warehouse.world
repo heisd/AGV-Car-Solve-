@@ -1,0 +1,117 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="complex_warehouse">
+
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <physics name="default_physics" default="0" type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+
+    <!-- Warehouse outer walls (16m x 16m interior, 3m tall) -->
+    <model name="warehouse_walls">
+      <static>true</static>
+      <link name="walls">
+        <collision name="north_col"><pose>0 8 1.5 0 0 0</pose><geometry><box><size>16.4 0.2 3</size></box></geometry></collision>
+        <visual name="north_vis"><pose>0 8 1.5 0 0 0</pose><geometry><box><size>16.4 0.2 3</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <collision name="south_col"><pose>0 -8 1.5 0 0 0</pose><geometry><box><size>16.4 0.2 3</size></box></geometry></collision>
+        <visual name="south_vis"><pose>0 -8 1.5 0 0 0</pose><geometry><box><size>16.4 0.2 3</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <collision name="east_col"><pose>8 0 1.5 0 0 0</pose><geometry><box><size>0.2 16.4 3</size></box></geometry></collision>
+        <visual name="east_vis"><pose>8 0 1.5 0 0 0</pose><geometry><box><size>0.2 16.4 3</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <collision name="west_col"><pose>-8 0 1.5 0 0 0</pose><geometry><box><size>0.2 16.4 3</size></box></geometry></collision>
+        <visual name="west_vis"><pose>-8 0 1.5 0 0 0</pose><geometry><box><size>0.2 16.4 3</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- Internal partition walls to divide the room and force detour -->
+    <!-- Partition 1: Middle vertical wall north part -->
+    <model name="internal_wall_north">
+      <static>true</static>
+      <pose>0 4 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 4.0 3</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>0.2 4.0 3</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- Partition 2: Middle vertical wall south part -->
+    <model name="internal_wall_south">
+      <static>true</static>
+      <pose>0 -4 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col"><geometry><box><size>0.2 4.0 3</size></box></geometry></collision>
+        <visual name="vis"><geometry><box><size>0.2 4.0 3</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- Bookshelves (Storage Racks) -->
+    <!-- Quadrant 1 (North-West) -->
+    <include><name>shelf_nw_0</name><uri>model://bookshelf</uri><pose>-4 5 0 0 0 0</pose></include>
+    <include><name>shelf_nw_1</name><uri>model://bookshelf</uri><pose>-3 5 0 0 0 0</pose></include>
+    <include><name>shelf_nw_2</name><uri>model://bookshelf</uri><pose>-2 5 0 0 0 0</pose></include>
+    <include><name>shelf_nw_3</name><uri>model://bookshelf</uri><pose>-4 3 0 0 0 0</pose></include>
+    <include><name>shelf_nw_4</name><uri>model://bookshelf</uri><pose>-3 3 0 0 0 0</pose></include>
+    <include><name>shelf_nw_5</name><uri>model://bookshelf</uri><pose>-2 3 0 0 0 0</pose></include>
+
+    <!-- Quadrant 2 (North-East) -->
+    <include><name>shelf_ne_0</name><uri>model://bookshelf</uri><pose>2 5 0 0 0 0</pose></include>
+    <include><name>shelf_ne_1</name><uri>model://bookshelf</uri><pose>3 5 0 0 0 0</pose></include>
+    <include><name>shelf_ne_2</name><uri>model://bookshelf</uri><pose>4 5 0 0 0 0</pose></include>
+    <include><name>shelf_ne_3</name><uri>model://bookshelf</uri><pose>2 3 0 0 0 0</pose></include>
+    <include><name>shelf_ne_4</name><uri>model://bookshelf</uri><pose>3 3 0 0 0 0</pose></include>
+    <include><name>shelf_ne_5</name><uri>model://bookshelf</uri><pose>4 3 0 0 0 0</pose></include>
+
+    <!-- Quadrant 3 (South-West) -->
+    <include><name>shelf_sw_0</name><uri>model://bookshelf</uri><pose>-4 -3 0 0 0 0</pose></include>
+    <include><name>shelf_sw_1</name><uri>model://bookshelf</uri><pose>-3 -3 0 0 0 0</pose></include>
+    <include><name>shelf_sw_2</name><uri>model://bookshelf</uri><pose>-2 -3 0 0 0 0</pose></include>
+    <include><name>shelf_sw_3</name><uri>model://bookshelf</uri><pose>-4 -5 0 0 0 0</pose></include>
+    <include><name>shelf_sw_4</name><uri>model://bookshelf</uri><pose>-3 -5 0 0 0 0</pose></include>
+    <include><name>shelf_sw_5</name><uri>model://bookshelf</uri><pose>-2 -5 0 0 0 0</pose></include>
+
+    <!-- Quadrant 4 (South-East) -->
+    <include><name>shelf_se_0</name><uri>model://bookshelf</uri><pose>2 -3 0 0 0 0</pose></include>
+    <include><name>shelf_se_1</name><uri>model://bookshelf</uri><pose>3 -3 0 0 0 0</pose></include>
+    <include><name>shelf_se_2</name><uri>model://bookshelf</uri><pose>4 -3 0 0 0 0</pose></include>
+    <include><name>shelf_se_3</name><uri>model://bookshelf</uri><pose>2 -5 0 0 0 0</pose></include>
+    <include><name>shelf_se_4</name><uri>model://bookshelf</uri><pose>3 -5 0 0 0 0</pose></include>
+    <include><name>shelf_se_5</name><uri>model://bookshelf</uri><pose>4 -5 0 0 0 0</pose></include>
+
+    <!-- Cabinets -->
+    <include><name>cabinet_0</name><uri>model://cabinet</uri><pose>-6 0 0 0 0 1.5708</pose></include>
+    <include><name>cabinet_1</name><uri>model://cabinet</uri><pose>-6 1 0 0 0 1.5708</pose></include>
+    <include><name>cabinet_2</name><uri>model://cabinet</uri><pose>6 0 0 0 0 -1.5708</pose></include>
+    <include><name>cabinet_3</name><uri>model://cabinet</uri><pose>6 -1 0 0 0 -1.5708</pose></include>
+
+    <!-- Utility Cart in central aisle -->
+    <include><name>cart_center</name><uri>model://utility_cart</uri><pose>0 0 0 0 0 1.5708</pose></include>
+
+    <!-- Dumpster at the corners -->
+    <include><name>dumpster_nw</name><uri>model://dumpster</uri><pose>-6 6 0 0 0 0.785</pose></include>
+    <include><name>dumpster_se</name><uri>model://dumpster</uri><pose>6 -6 0 0 0 -0.785</pose></include>
+
+    <!-- Euro Pallets stacked -->
+    <include><name>pallet_0</name><uri>model://euro_pallet</uri><pose>-4 0.5 0.07 0 0 0</pose></include>
+    <include><name>pallet_1</name><uri>model://euro_pallet</uri><pose>-4 0.5 0.21 0 0 0.2</pose></include>
+
+    <!-- Cardboard Boxes as scattered obstacles -->
+    <include><name>box_0</name><uri>model://cardboard_box</uri><pose>-2.5 0.8 0 0 0 0.5</pose></include>
+    <include><name>box_1</name><uri>model://cardboard_box</uri><pose>2.5 1.5 0 0 0 -0.3</pose></include>
+    <include><name>box_2</name><uri>model://cardboard_box</uri><pose>-1.5 -1.8 0 0 0 0.8</pose></include>
+    <include><name>box_3</name><uri>model://cardboard_box</uri><pose>1.5 -1.8 0 0 0 0</pose></include>
+
+    <!-- Trash cans -->
+    <include><name>trash_0</name><uri>model://first_2015_trash_can</uri><pose>-6 -5 0 0 0 0</pose></include>
+    <include><name>trash_1</name><uri>model://first_2015_trash_can</uri><pose>6 5 0 0 0 0</pose></include>
+
+  </world>
+</sdf>

@@ -471,4 +471,19 @@ TF：map ─(AMCL)─► <ns>/odom ─(odom_sim_filter)─► <ns>/base_footprin
 - **编译与编译检查**：
   - colcon 重新编译且语法校验完全通过。
 
+## 20. 新增复杂仓库仿真场景（complex_warehouse.world）
+
+为了测试 SLAM 算法的建图极限以及车辆的动态避障能力，设计并新增了一个更复杂的仓库仿真场景。
+
+### 改动 / 新增
+- **场景设计**（`complex_warehouse.world`）：
+  - 创建了全新的 [complex_warehouse.world](file:///home/li/GazeboLib/src/amr_description/worlds/complex_warehouse.world)，包含 16m x 16m 外墙。
+  - **隔墙分区**：在正中央纵向加入了南北两段隔墙（`internal_wall_north` 和 `internal_wall_south`），各长 4m，只保留中央宽 4m 的通道，迫使小车绕行。
+  - **货架重组**：划分为四个象限，每个象限布置了 6 个 `model://bookshelf`（共 24 个货架），形成狭窄的网格通道。
+  - **多样式障碍物**：在关键通道和角落里摆放了 `model://cabinet` (柜子)、`model://cardboard_box` (纸箱)、`model://dumpster` (大型垃圾桶)、`model://euro_pallet` (叠放木托盘) 和 `model://first_2015_trash_can` (垃圾桶) 等，形成富有挑战性的建图和路径规划迷宫。
+  - **模型资源解析**：上述物品皆基于 Gazebo 默认本地缓存目录 `~/.gazebo/models` 进行引用（`model://`），无需额外添加资源路径即可直接加载。
+- **构建缓存修复与部署**：
+  - 新增文件后由于 `colcon` 对 `setuptools` 存在文件清单缓存，导致直接编译报错。通过执行 `rm -rf build/amr_description install/amr_description` 清理编译缓存后重新运行 `colcon build --symlink-install --packages-select amr_description` 成功完成安装。
+
+
 

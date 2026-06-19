@@ -61,6 +61,7 @@ class FleetManager(Node):
         # 每车空闲待命点 [x1,y1,x2,y2,...] (与 robot_namespaces 同序)；空则用内置默认。
         self.declare_parameter('home_xy', [])
         self.declare_parameter('require_nav_ready', False)
+        self.declare_parameter('world_file', '')
 
         self.ns_list = list(self.get_parameter('robot_namespaces').value)
         self.low_thr = float(self.get_parameter('battery_low_threshold').value)
@@ -69,6 +70,9 @@ class FleetManager(Node):
         self.batt_topic_type = str(self.get_parameter('battery_topic_type').value)
         self.charger_zone_names = list(self.get_parameter('charger_zone_names').value)
         self.require_nav_ready = bool(self.get_parameter('require_nav_ready').value)
+
+        world_file = str(self.get_parameter('world_file').value or '').strip()
+        self.world_name = os.path.splitext(os.path.basename(world_file))[0] if world_file else 'warehouse'
 
         # 空闲待命点：作业完成后回到各自独立的开阔走廊点，避免赖在作业区互相阻挡/相撞。
         # 默认点都在东/西走廊空地，彼此分散且远离取/卸货/充电区（坐标匹配 warehouse.world）。
@@ -834,6 +838,7 @@ class FleetManager(Node):
 
         payload = {
             'stamp': time.time(),
+            'world_name': self.world_name,
             'agvs': agvs,
             'queued_tasks': len(self.task_queue),
             'zones': zones,

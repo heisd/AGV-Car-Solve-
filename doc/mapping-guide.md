@@ -19,13 +19,24 @@
 本项目基于 `slam_toolbox` 提供了完整的激光雷达 SLAM 建图工具链。在 `zsh` 环境中，可以通过以下三个步骤扫描并保存新地图。
 
 ### 1.1 步骤一：启动建图仿真环境
-在一个新终端中运行建图 Launch 文件。该脚本将启动 Gazebo 仿真环境（加载 `map.world` 场景）、一辆配置了单线激光雷达的 `agv1` 小车、SLAM 节点以及 RViz2 可视化界面：
-```zsh
-cd ~/GazeboLib
-source /opt/ros/humble/setup.zsh
-source install/setup.zsh
-ros2 launch amr_description mapping.launch.py
-```
+在一个新终端中运行建图 Launch 文件。该脚本将启动 Gazebo 仿真环境（默认加载 `map.world` 场景，也可以指定更复杂的仓库场景）、一辆配置了单线激光雷达的 `agv1` 小车、SLAM 节点以及 RViz2 可视化界面。
+
+* **使用默认简易地图**：
+  ```zsh
+  cd ~/GazeboLib
+  source /opt/ros/humble/setup.zsh
+  source install/setup.zsh
+  ros2 launch amr_description mapping.launch.py
+  ```
+
+* **使用新建的复杂仓库场景 (`warehouse_complex.world`)**：
+  ```zsh
+  cd ~/GazeboLib
+  source /opt/ros/humble/setup.zsh
+  source install/setup.zsh
+  ros2 launch amr_description mapping.launch.py world:=/home/li/GazeboLib/install/amr_description/share/amr_description/worlds/warehouse_complex.world
+  ```
+
 
 ### 1.2 步骤二：遥控小车扫描地图
 在第二个终端中启动键盘遥控节点，通过键盘按键（如 `i`/`,`/`j`/`l`）控制小车在仓库内慢速行驶，使其雷达光束扫描到所有的墙壁、货架和障碍物：
