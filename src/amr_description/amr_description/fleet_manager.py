@@ -32,6 +32,7 @@ class AGVState:
         self.state_since = time.time()
         self.carrying = False
         self.nav_ready = False  # 该车 Nav2(导航栈) 是否已激活就绪
+        self.stuck = False      # 朝目标长时间无进展（卡死/被堵）
 
 class FleetManager(Node):
     """
@@ -270,12 +271,23 @@ class FleetManager(Node):
         for ns in self.ns_list:
             if ns in should_yield and ns not in self._yielding:
                 self._yielding.add(ns)
-                self.send_goal_xy(ns, self.agv[ns].pose)     # 原地停车让行
-                self.get_logger().warn(f"[{ns}] 路径冲突·优先级低 → 原地让行等待。")
+                px, py = self.yield_pullaside_target(self.agv[ns])
+                self.send_goal_xy(ns, (px, py))              # 横向让到走廊内侧，让出单行道
+                self.get_logger().warn(
+                    f"[{ns}] 路径冲突·优先级低 → 横向让行至 ({px:.1f},{py:.1f})，让出车道。")
             elif ns not in should_yield and ns in self._yielding:
                 self._yielding.discard(ns)
                 self.reissue_goal(ns)                        # 对方驶离，恢复原目标
                 self.get_logger().info(f"[{ns}] 冲突解除 → 恢复行驶。")
+
+    def yield_pullaside_target(self, agv):
+        """让行点：让出 x=±5.5 / y=±5.5 单行车道——靠近东/西墙(|x|大)就沿 x 朝中心(0)
+        横移 1m；否则沿 y 朝中心横移 1m。高优先级车即可沿原车道通过，避免"原地停"堵路相撞。"""
+        x, y = agv.pose
+        off = 1.1
+        if abs(x) >= abs(y):
+            return (x - off if x > 0 else x + off, y)
+        return (x, y - off if y > 0 else y + off)
 
     def reissue_goal(self, ns):
         """让行结束后，按当前状态重新下发目标。"""
@@ -507,8 +519,10 @@ class FleetManager(Node):
         if d < prog['best_d'] - self._goal_progress_eps:
             prog['best_d'] = d                 # closing in — refresh watchdog
             prog['t'] = now
+            agv.stuck = False                  # 有进展 → 清卡死标志
             return
         if now - prog['t'] >= self._goal_resend_interval:
+            agv.stuck = True                   # 长时间无进展 → 标记卡死（前端异常显示）
             self.get_logger().warn(
                 f"[{ns}] No progress toward {zone_name} for "
                 f"{self._goal_resend_interval:.0f}s (d={d:.2f} m) — re-sending goal.")
@@ -598,6 +612,7 @@ class FleetManager(Node):
                 'carrying': bool(a.carrying),
                 'on_charger': bool(a.on_charger),
                 'nav_ready': bool(a.nav_ready),    # Nav2 导航栈是否就绪（未就绪 Web 会标红）
+                'stuck': bool(a.stuck),            # 朝目标长时间无进展
             })
         zones = {
             name: {'cx': float(z['cx']), 'cy': float(z['cy']),
@@ -630,6 +645,31 @@ class FleetManager(Node):
             })
         idle_agvs = [ns for ns in self.ns_list if self.agv[ns].state == 'IDLE']
 
+        # ---- 系统异常总览（供前端"系统异常"面板统一显示） ----
+        # level: error(红) / warn(橙) / info(蓝)
+        anomalies = []
+        for c in self._collisions:               # 碰撞/危险接近（最严重）
+            anomalies.append({'level': 'error', 'ns': f"{c['a']}↔{c['b']}",
+                              'type': '碰撞', 'msg': f"危险接近 {c['d']} m"})
+        for ns in self.ns_list:
+            a = self.agv[ns]
+            if a.pose is None:
+                anomalies.append({'level': 'error', 'ns': ns, 'type': '离线',
+                                  'msg': '无位姿/未上报（Gazebo 未生成或里程计缺失）'})
+                continue
+            if not a.nav_ready:
+                anomalies.append({'level': 'warn', 'ns': ns, 'type': '导航未就绪',
+                                  'msg': 'Nav2 导航栈未激活'})
+            if a.battery < self.low_thr and not a.on_charger and a.state != 'CHARGING':
+                anomalies.append({'level': 'warn', 'ns': ns, 'type': '低电量',
+                                  'msg': f"电量 {a.battery*100:.0f}% < {self.low_thr*100:.0f}%"})
+            if a.stuck and a.state in ('TO_PICKUP', 'TO_DROPOFF', 'TO_CHARGER'):
+                anomalies.append({'level': 'warn', 'ns': ns, 'type': '导航卡死',
+                                  'msg': '朝目标长时间无进展（被堵/规划失败）'})
+            if ns in self._yielding:
+                anomalies.append({'level': 'info', 'ns': ns, 'type': '让行中',
+                                  'msg': '路径冲突·优先级低，原地让行'})
+
         payload = {
             'stamp': time.time(),
             'agvs': agvs,
@@ -642,6 +682,7 @@ class FleetManager(Node):
             'yielding': sorted(self._yielding),     # 正在让行充电车的车（路径冲突·充电优先）
             'collisions': self._collisions,         # 当前碰撞/危险接近对 [{a,b,d}]
             'collision_count': self.collision_count,  # 累计碰撞事件数
+            'anomalies': anomalies,                 # 系统异常总览
         }
         self.fleet_state_pub.publish(String(data=json.dumps(payload)))
 

@@ -130,6 +130,17 @@ td.muted, .muted { color: var(--muted); }
 .badge.yield { background: rgba(255,167,51,.18); color: var(--orange); margin-left: 4px; }
 .badge.navdown { background: rgba(255,93,93,.18); color: var(--red); margin-left: 4px; }
 .ok-text { color: var(--green); }
+.warn-text { color: var(--orange); font-weight: 600; }
+.err-text { color: var(--red); font-weight: 700; }
+
+.anomaly-list { list-style: none; margin: 0; padding: 0; max-height: 200px; overflow-y: auto; font-size: 13px; }
+.anomaly-list li { padding: 5px 6px; border-bottom: 1px solid var(--line); }
+.anomaly-list li .ai { margin-right: 6px; }
+.anomaly-list li .atype { font-weight: 600; }
+.anomaly-list li.anom.error { background: rgba(255,93,93,.10); }
+.anomaly-list li.anom.error .atype { color: var(--red); }
+.anomaly-list li.anom.warn .atype { color: var(--orange); }
+.anomaly-list li.anom.info .atype { color: var(--accent); }
 .badge.TO_PICKUP, .badge.TO_DROPOFF { background: rgba(61,169,252,.18); color: var(--accent); }
 .badge.LOADING, .badge.UNLOADING { background: rgba(255,167,51,.18); color: var(--orange); }
 .badge.TO_CHARGER, .badge.CHARGING { background: rgba(61,220,132,.16); color: var(--green); }

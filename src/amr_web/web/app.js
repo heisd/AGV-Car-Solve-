@@ -331,6 +331,29 @@ function renderTasks(state) {
   }).join('');
 }
 
+// ---- 系统异常总览 ----
+const ANOM_ICON = { error: '⛔', warn: '⚠', info: 'ℹ' };
+
+function renderAnomalies(state) {
+  const anoms = state.anomalies || [];
+  const countEl = document.getElementById('anomalyCount');
+  const list = document.getElementById('anomalyList');
+  const errs = anoms.filter((a) => a.level === 'error').length;
+  const warns = anoms.filter((a) => a.level === 'warn').length;
+  if (!anoms.length) {
+    countEl.textContent = '· 正常';
+    countEl.className = 'ok-text';
+    list.innerHTML = '<li class="muted">系统正常，无异常…</li>';
+    return;
+  }
+  countEl.textContent = '· ' + (errs ? `${errs} 严重 ` : '') + (warns ? `${warns} 警告` : '');
+  countEl.className = errs ? 'err-text' : 'warn-text';
+  list.innerHTML = anoms.map((a) =>
+    `<li class="anom ${a.level}"><span class="ai">${ANOM_ICON[a.level] || ''}</span>`
+    + `<b>${escapeHtml(a.ns)}</b> <span class="atype">${escapeHtml(a.type)}</span> `
+    + `<span class="muted">${escapeHtml(a.msg)}</span></li>`).join('');
+}
+
 // ---- 区域下拉框 (仅在 zones 变化时重建) ----
 function populateZones(zones) {
   const names = Object.keys(zones);
@@ -460,6 +483,7 @@ function connect() {
       if (state.zones) { lastZones = state.zones; populateZones(state.zones); }
       renderFleet(state);
       renderTasks(state);
+      renderAnomalies(state);
       updateCollisionAlarm(state);
       render();
     });

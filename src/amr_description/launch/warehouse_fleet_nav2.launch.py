@@ -197,8 +197,9 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('use_web', default_value='true',
                               description='是否启动 Web 面板层 (rosbridge + 网页)。'),
-        DeclareLaunchArgument('num_agvs', default_value='3',
-                              description='Nav2 车数 1-3。WSL2 上每套 Nav2 较重，建议先 1，机器够强再加。'),
+        DeclareLaunchArgument('num_agvs', default_value='2',
+                              description='Nav2 车数 1-3。默认 2：本机 WSL2(8G/16核) 同时拉 3 套完整 Nav2 '
+                                          '会出现第 3 套组合节点(load_node)加载超时、导航栈起不全，故默认 2 稳定可靠。'),
         DeclareLaunchArgument('gui', default_value='true',
                               description='是否启动 Gazebo 客户端 GUI (gzclient)。headless 压测设 false。'),
         OpaqueFunction(function=launch_setup),
