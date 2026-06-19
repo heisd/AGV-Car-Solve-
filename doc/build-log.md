@@ -351,3 +351,124 @@ TF：map ─(AMCL)─► <ns>/odom ─(odom_sim_filter)─► <ns>/base_footprin
 
 ### 验证（headless, `num_agvs:=2`）
 - 待补：横向让行后 agv2 让出西走廊、agv1 顺利抵达充电站完成回充、碰撞计数 0/极少。
+
+## 14. 路权系统升级：走廊段预约制（v2.0）
+
+围绕"窄走廊对向死锁 / 反应式让行太晚 / 原地停车堵路"做的路权系统全面重构。
+
+> **核心决策**：经调研（Zone Control / Time-Window Reservation / CBS / Petri Net / IDRR 等方案），
+> 选定 **走廊段预约制 + 优先级裁决 + 等待点策略** ——
+> 本仓库走廊天然单行道（~2m 宽），适合建模为互斥资源；2~3 台车不需要复杂的 CBS/TWR。
+> 详细设计文档见 `doc/right-of-way-design.md`。
+
+### 改动 / 新增
+- **走廊段定义**（`fleet_manager.py`）：5 条命名走廊段（east/west/north/south/center_ns），
+  每段以矩形区域界定（`CORRIDOR_SEGMENTS` dict），覆盖仓库四周走廊 + 中央南北通道。
+- **段预约/释放/队列**：
+  - `_segment_owner`：段当前拥有者（互斥，同一时刻仅一台车）
+  - `_segment_queue`：段等待队列（按 FIFO 排队，段释放后自动提升队首）
+  - `try_reserve_segment()`：按优先级裁决通行权，高优先级可抢占
+  - `release_segments()`：车离开段后自动释放
+  - `promote_waiting()`：段空闲后队首车获得路权并恢复导航
+- **10 个等待点**（`WAIT_POINTS`）：每条走廊两端入口各一个安全等待位置，
+  让行车停在走廊入口外，不阻挡主通道（解决旧方案"原地停车堵路"的根本问题）。
+- **`apply_traffic_rules()`**：替换旧 `apply_traffic_priority()` 成为防撞核心——
+  每 250ms：段占用检测 → 释放已离开的段 → 预约当前段（冲突则让行到等待点）→ 队列推进。
+- **`release_all()` 同时释放段**：任务完成/放弃时一并清除走廊段预约。
+- **`reissue_goal()` 增加 TO_CHARGER**：让行结束后充电车也能正确恢复导航目标。
+- **`/fleet/state` 新增字段**：`segment_owner`（段占用）、`segment_queue`（等待队列），供前端可视化。
+- **异常面板新增**：`段等待` 类型（info），显示等待点坐标。
+- **删除旧方案**：`yield_radius`、`yield_pullaside_target()` 已移除。
+- **新文档**：`doc/right-of-way-design.md`（路权系统设计文档，含行业调研、架构图、算法流程、死锁预防）。
+
+### 保留不变
+- `PRIORITY` 优先级字典（充电=5 > 送货=4 > 取货=3 > 空闲=1）
+- `check_collisions()`（碰撞检测安全兜底）
+- 区域互斥 `_zone_owner`（保护端点区域：取/卸货/充电站）
+- `_yielding` 集合语义不变（让行中跳过任务分配、不重发目标）
+
+### 验证
+- `py_compile` 通过（855 行，语法正确）。
+- 运行时验证待补。
+
+## 15. 前后端状态对齐：路权可视化与状态面板
+
+为了让前端操作面板（Web UI）与后端新引入的走廊段预约制路权系统（v2.0）状态对齐，对 `amr_web` 包的前端进行了升级。
+
+### 改动 / 新增
+- **地图上走廊段可视化**（`app.js`）：
+  - 声明了静态的走廊段几何边界 `CORRIDOR_SEGMENTS`。
+  - 在 `render()` 中添加 `drawCorridors()`，空闲走廊以灰色虚线框表示，被占用时以占用小车的颜色高亮描边加浅色填充（12% 透明度），并居中显示走廊名、当前占用车以及等待队列小车。
+- **地图上安全等待点可视化**（`app.js`）：
+  - 声明了 10 个安全等待点 `WAIT_POINTS`。
+  - 在 `render()` 中添加 `drawWaitPoints()`，将其渲染为橙色双圈小圆点。
+- **新增路权状态表格**（`index.html` & `app.js` & `style.css`）：
+  - 在侧边栏新增 "路权与走廊状态" 面板，实时以表格形式展示 5 条走廊段的占用小车、排队队列以及坐标范围。
+  - 顶部状态标志（例如 `· 已锁 2 段`）实时汇总被占用的路段数量。
+- **地图图例项升级**（`index.html` & `style.css`）：
+  - 图例中新增 "走廊段" 和 "等待点" 的样式和说明。
+- **编译与验证**：
+  - 使用 `colcon build --symlink-install --packages-select amr_web` 重新编译，确保前端静态资源更新安装至 `install` 目录下。
+  - 使用 `node -c` 对 `app.js` 进行 JavaScript 语法检查，完全通过。
+
+## 16. 导航就绪容错与兼容性补偿（多车流控）
+
+解决问题：在启动多台 AGV（例如 3 车）的 Nav2 模式下，若部分车辆的 Nav2 导航栈未完全就绪，或启动中途崩溃，调度中心若仍将任务分配给它，将导致该任务因为小车无法响应导航目标而永久卡死堵塞。同时，需要兼容不使用 Nav2 的真值跟随器模式。
+
+### 改动 / 新增
+- **新增 `require_nav_ready` 参数**（`fleet_manager.py`）：
+  - 在调度节点中引入了布尔参数 `require_nav_ready`（默认 `False`）。
+  - 在 `warehouse_fleet_nav2.launch.py` 中将该参数显式配置为 `True`；在 `warehouse_fleet.launch.py` 中配置为 `False`。
+- **任务分配容错机制**（`fleet_manager.py`）：
+  - 修改 `assign_tasks()` 方法。当配置了 `require_nav_ready=True` 时，从备选 IDLE 列表中过滤掉所有 `nav_ready` 为 `False`（导航未就绪）的小车，**避免将任务下发给未就绪或已崩溃的车辆**。这样未出问题的车辆仍可正常运转，实现系统的优雅降级。
+- **异常上报静音化**（`fleet_manager.py`）：
+  - 在 `publish_fleet_state()` 的异常统计中，仅当 `require_nav_ready=True` 时，才将 `nav_ready=False` 计入“导航未就绪”警告（系统异常面板），避免在真值回退模式下产生大量无用的红字告警。
+- **前端适配与状态同步**（`app.js`）：
+  - 调度中心 payload 中返回了 `require_nav_ready`。
+  - 前端 Web 界面在 `renderFleet()` 中渲染小车的“导航未就绪”标记（橙标）时，仅在 `state.require_nav_ready` 开启时渲染，真值模式下不予以显示，精简用户界面噪声。
+
+## 17. 空闲待命点（Home Points）前端可视化
+
+为了让操作员能清晰看到每辆小车在空闲状态下会回到哪个特定的“安全停放位置”（避免互相阻挡），在前端 Web 界面中增加了空闲待命点（`home_x`, `home_y`）的可视化支持。
+
+### 改动 / 新增
+- **后端序列化扩展**（`fleet_manager.py`）：
+  - 在 `publish_fleet_state()` 的车辆数据序列化中，从 `self.home` 字典提取每个 AGV 的 `home_x` 和 `home_y` 并作为 JSON 字段发送给前端。
+- **地图 Canvas 上待命点绘制**（`app.js`）：
+  - 新增 `drawHomePoints()` 函数并在 `render()` 中调用。
+  - 用小车专属颜色绘制待命点的虚线小圈及核心圆点，并在圆点上方提示文字标签（如 `agv1·待命`）。
+- **车队状态表格扩展**（`index.html` & `app.js` & `style.css`）：
+  - 在“车队状态”表格中追加“待命点”列头。
+  - 在 `renderFleet()` 渲染中动态提取车辆的待命点坐标进行列表显示，让用户直观地获取每辆小车的待命点设定。
+  - 在地图图例中增加“待命点”（虚线彩色圆圈）的图标与文字说明。
+- **编译与语法校验**：
+  - colcon 重新构建项目，经测试 Python 模块与 JavaScript 语法校验全部通过。
+
+## 18. Gazebo 仿真场景（world）参数化配置支持
+
+解决问题：在此前的多车调度主入口 Launch 脚本中，Gazebo 仿真场景世界（`warehouse.world`）路径硬编码在 Python 代码内，操作员无法通过启动命令行指定自定义的 Gazebo World 文件。
+
+### 改动 / 新增
+- **主启动脚本参数化**（`warehouse_fleet_nav2.launch.py`）：
+  - 在 `generate_launch_description()` 中新增了 `world` 的 `DeclareLaunchArgument` 声明，默认指向包内自带的 `warehouse.world`。
+  - 在 `launch_setup()` 内部，通过 `context.launch_configurations.get('world')` 动态读取传入的值，并正确下发给 Gazebo 启动流程。
+- **操作指南同步**（`operations-guide.md`）：
+  - 维护了操作指南的“启动参数”表格，增加 `world` 参数说明，并在“示例”中添加了如何指定自定义世界的启动指令（如：`world:=/path/to/custom.world`）。
+- **编译测试**：
+  - 编译重新通过，支持通过 `world:=` 参数拉起不同世界场景。
+
+## 19. 建图 Launch 脚本优化：动态工作空间解析与 world 参数化
+
+解决问题：建图仿真脚本 `mapping.launch.py` 原先存在两处重大限制：
+1. 建图场景世界（`map.world`）路径硬编码在 Python 代码中，无法通过外部传参指定需要建图的其他 Gazebo World 文件。
+2. 自动启动遥控键盘的 xterm 脚本内，工作空间路径被硬编码为容器专用的 `/workspace/colcon_ws`，导致在本地系统上启动时会因为找不到 `setup.bash` 文件而导致遥控终端启动失败。
+
+### 改动 / 新增
+- **工作空间路径动态解析**（`mapping.launch.py`）：
+  - 移除硬编码路径，在 `generate_launch_description()` 内部通过 `get_package_share_directory('amr_description')` 向上三级目录解析，自动并精准获取当前系统的绝对 `install` 目录，动态生成键盘遥控所用 `setup.bash` 的引用路径，实现跨设备零配置运行。
+- **建图场景参数化**（`mapping.launch.py`）：
+  - 增加了 `world` 的 `DeclareLaunchArgument` 参数声明，默认值为内置的 `map.world`。允许在建图时通过 `world:=` 命令行指定需要扫描的其他任意 `.world` 文件（如：`world:=$(ros2 pkg prefix amr_description)/share/amr_description/worlds/warehouse.world`）。
+- **编译与编译检查**：
+  - colcon 重新编译且语法校验完全通过。
+
+

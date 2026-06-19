@@ -141,6 +141,7 @@ def generate_launch_description():
             'battery_low_threshold': 0.20,
             'battery_resume_threshold': 0.60,
             'goal_reach_dist': 0.30,
+            'require_nav_ready': False,
         }],
         output='screen', emulate_tty=True,
     ))

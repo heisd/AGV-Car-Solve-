@@ -32,6 +32,9 @@
         <span><i class="sw charger"></i>充电站</span>
         <span><i class="sw zone"></i>任务区</span>
         <span><i class="sw approach"></i>接近点</span>
+        <span><i class="sw corridor"></i>走廊段</span>
+        <span><i class="sw waitpoint"></i>等待点</span>
+        <span><i class="sw homepoint"></i>待命点</span>
         <span><i class="sw path"></i>Nav2 路径</span>
         <span><i class="sw agv"></i>AGV (▲朝向)</span>
       </div>
@@ -76,10 +79,22 @@
         <div class="panel-title">车队状态 <small id="agvCount"></small> <small class="muted">· 点击行可选车手动导航</small></div>
         <table id="fleetTable">
           <thead>
-            <tr><th>AGV</th><th>状态</th><th>电量</th><th>载货</th><th>位置 (x, y)</th></tr>
+            <tr><th>AGV</th><th>状态</th><th>电量</th><th>载货</th><th>位置 (x, y)</th><th>待命点</th></tr>
           </thead>
           <tbody id="fleetBody">
-            <tr><td colspan="5" class="muted">等待车队状态…</td></tr>
+            <tr><td colspan="6" class="muted">等待车队状态…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">路权与走廊状态 <small id="rowStatus"></small></div>
+        <table id="rowTable">
+          <thead>
+            <tr><th>走廊段</th><th>当前占用车</th><th>等待队列</th><th>位置范围 (x, y)</th></tr>
+          </thead>
+          <tbody id="rowBody">
+            <tr><td colspan="4" class="muted">等待路权数据…</td></tr>
           </tbody>
         </table>
       </div>

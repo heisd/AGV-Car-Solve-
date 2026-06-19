@@ -41,7 +41,8 @@ def launch_setup(context, *args, **kwargs):
     pkg_web = get_package_share_directory('amr_web')
     nav2_bringup_dir = get_package_share_directory('nav2_bringup')
 
-    world = os.path.join(pkg_amr, 'worlds', 'warehouse.world')
+    default_world = os.path.join(pkg_amr, 'worlds', 'warehouse.world')
+    world = context.launch_configurations.get('world', default_world)
     map_file = os.path.join(pkg_amr, 'maps', 'warehouse_map.yaml')
     tasks_file = os.path.join(pkg_amr, 'yaml', 'warehouse_tasks.yaml')
     xacro_path = os.path.join(pkg_amr, 'urdf', 'amr.urdf.xacro')
@@ -181,6 +182,7 @@ def launch_setup(context, *args, **kwargs):
             'battery_low_threshold': 0.20,
             'battery_resume_threshold': 0.60,
             'goal_reach_dist': 0.30,
+            'require_nav_ready': True,
         }],
         output='screen', emulate_tty=True,
     ))
@@ -194,7 +196,11 @@ def launch_setup(context, *args, **kwargs):
 
 
 def generate_launch_description():
+    pkg_amr = get_package_share_directory('amr_description')
+    default_world = os.path.join(pkg_amr, 'worlds', 'warehouse.world')
     return LaunchDescription([
+        DeclareLaunchArgument('world', default_value=default_world,
+                              description='Gazebo world 绝对路径。'),
         DeclareLaunchArgument('use_web', default_value='true',
                               description='是否启动 Web 面板层 (rosbridge + 网页)。'),
         DeclareLaunchArgument('num_agvs', default_value='2',

@@ -60,6 +60,7 @@ class FleetManager(Node):
         self.declare_parameter('charger_zone_names', ['charger_1','charger_2'])
         # 每车空闲待命点 [x1,y1,x2,y2,...] (与 robot_namespaces 同序)；空则用内置默认。
         self.declare_parameter('home_xy', [])
+        self.declare_parameter('require_nav_ready', False)
 
         self.ns_list = list(self.get_parameter('robot_namespaces').value)
         self.low_thr = float(self.get_parameter('battery_low_threshold').value)
@@ -67,6 +68,7 @@ class FleetManager(Node):
         self.reach_dist = float(self.get_parameter('goal_reach_dist').value)
         self.batt_topic_type = str(self.get_parameter('battery_topic_type').value)
         self.charger_zone_names = list(self.get_parameter('charger_zone_names').value)
+        self.require_nav_ready = bool(self.get_parameter('require_nav_ready').value)
 
         # 空闲待命点：作业完成后回到各自独立的开阔走廊点，避免赖在作业区互相阻挡/相撞。
         # 默认点都在东/西走廊空地，彼此分散且远离取/卸货/充电区（坐标匹配 warehouse.world）。
@@ -145,9 +147,34 @@ class FleetManager(Node):
         self.standby_tol = 0.6                   # m，到待命点的容差
 
         # 充电优先让行：去充电的车(TO_CHARGER)在路径冲突时享有更高优先级，
-        # 其它车进入其 yield_radius 内则原地停车让行，待充电车通过后恢复。
+        # 其它车进入其走廊段时需停车让行，待充电车通过后恢复。
         self._yielding: set = set()              # 当前正在让行的车 ns
-        self.yield_radius = 1.6                  # m，进入此半径触发让行
+
+        # ---- 走廊段预约制路权系统 ----
+        # 仓库走廊划分为命名段，每段同一时刻只允许一台车通行（单行互斥）。
+        # AGV 进入走廊前须预约段；占用冲突时按优先级裁决，低优先级车在入口等待点停车。
+        self.CORRIDOR_SEGMENTS = {
+            'corridor_east':      {'x_min': 4.5, 'x_max': 6.5, 'y_min': -6.5, 'y_max': 6.5},
+            'corridor_west':      {'x_min': -6.5, 'x_max': -4.5, 'y_min': -6.5, 'y_max': 6.5},
+            'corridor_north':     {'x_min': -6.5, 'x_max': 6.5, 'y_min': 4.5, 'y_max': 6.5},
+            'corridor_south':     {'x_min': -6.5, 'x_max': 6.5, 'y_min': -6.5, 'y_max': -4.5},
+            'corridor_center_ns': {'x_min': -1.0, 'x_max': 1.0, 'y_min': -6.5, 'y_max': 6.5},
+        }
+        self._segment_owner: dict = {}        # segment_name -> ns（段拥有者）
+        self._segment_queue: dict = {s: [] for s in self.CORRIDOR_SEGMENTS}  # 段等待队列
+        self.WAIT_POINTS = {
+            'corridor_east_south':    (5.5, -6.0),
+            'corridor_east_north':    (5.5,  6.0),
+            'corridor_west_south':    (-5.5, -6.0),
+            'corridor_west_north':    (-5.5,  6.0),
+            'corridor_north_east':    (6.0,  5.5),
+            'corridor_north_west':    (-6.0, 5.5),
+            'corridor_south_east':    (6.0, -5.5),
+            'corridor_south_west':    (-6.0, -5.5),
+            'corridor_center_south':  (0.0, -6.0),
+            'corridor_center_north':  (0.0,  6.0),
+        }
+        self._wait_target: dict = {}   # ns -> (x,y) 当前让行等待点目标
 
         # 碰撞检测：两车中心距 < collision_dist 视为碰撞/危险接近，
         # 边沿触发告警(WARN→Web异常日志)，并在 /fleet/state 发布当前碰撞对供前端显示。
@@ -204,8 +231,8 @@ class FleetManager(Node):
         for ns in self.ns_list:
             self.run_agv(ns)
 
-        # 路径冲突·优先级让行（碰撞预防；充电车优先级最高）
-        self.apply_traffic_priority()
+        # 走廊段预约制路权（碰撞预防；按任务优先级裁决通行权）
+        self.apply_traffic_rules()
 
         # 碰撞检测（监控两车危险接近，告警 + 发布给前端）
         self.check_collisions()
@@ -250,49 +277,173 @@ class FleetManager(Node):
     def robot_priority(self, agv):
         return self.PRIORITY.get(agv.state, 1)
 
-    def apply_traffic_priority(self):
-        """通用优先级让行（防撞核心）：任意两车进入 yield_radius 时，优先级低的一方
-        原地停车让行，待对方驶离再恢复——充电车优先级最高。仅靠 Nav2 costmap 在窄道
-        相遇会撞，这里在调度层加确定性让行规则。相等优先级按 ns 字典序，仅一方让行避免死锁。"""
-        moving = [self.agv[ns] for ns in self.ns_list if self.agv[ns].pose is not None]
-        should_yield = set()
-        for i in range(len(moving)):
-            for j in range(i + 1, len(moving)):
-                a, b = moving[i], moving[j]
-                if dist(a.pose, b.pose) > self.yield_radius:
-                    continue
-                pa, pb = self.robot_priority(a), self.robot_priority(b)
-                if pa != pb:
-                    loser = a if pa < pb else b
-                else:
-                    loser = a if a.ns > b.ns else b   # 平级：ns 大者让，确定且唯一
-                should_yield.add(loser.ns)
+    def detect_segments(self, pose):
+        """返回 pose (x,y) 所在的所有走廊段名列表。"""
+        if pose is None:
+            return []
+        x, y = pose
+        segs = []
+        for name, rect in self.CORRIDOR_SEGMENTS.items():
+            if rect['x_min'] <= x <= rect['x_max'] and rect['y_min'] <= y <= rect['y_max']:
+                segs.append(name)
+        return segs
 
+    def heading_direction(self, agv, segment_name):
+        """判断 AGV 在走廊段内的行进方向：'positive'/'negative'/'unknown'。
+        东/西走廊取 y 分量，南/北走廊取 x 分量，中心南北走廊取 y 分量。"""
+        yaw = agv.yaw
+        if segment_name in ('corridor_east', 'corridor_west', 'corridor_center_ns'):
+            return 'positive' if math.sin(yaw) > 0.3 else ('negative' if math.sin(yaw) < -0.3 else 'unknown')
+        elif segment_name in ('corridor_north', 'corridor_south'):
+            return 'positive' if math.cos(yaw) > 0.3 else ('negative' if math.cos(yaw) < -0.3 else 'unknown')
+        return 'unknown'
+
+    def try_reserve_segment(self, ns, segment_name):
+        """尝试预约走廊段。若无人占用或已被自己占用则成功；否则按优先级裁决。
+        高优先级车可抢占，低优先级车加入等待队列。返回 True 表示获得通行权。"""
+        owner = self._segment_owner.get(segment_name)
+        if owner is None or owner == ns:
+            self._segment_owner[segment_name] = ns
+            # 从等待队列移除（若之前排队的话）
+            if ns in self._segment_queue[segment_name]:
+                self._segment_queue[segment_name].remove(ns)
+            return True
+        # 已被他车占用——按优先级裁决
+        my_pri = self.robot_priority(self.agv[ns])
+        owner_pri = self.robot_priority(self.agv[owner])
+        if my_pri > owner_pri:
+            # 高优先级抢占：原占有者被挤入等待队列
+            self._segment_owner[segment_name] = ns
+            if ns in self._segment_queue[segment_name]:
+                self._segment_queue[segment_name].remove(ns)
+            if owner not in self._segment_queue[segment_name]:
+                self._segment_queue[segment_name].insert(0, owner)
+            self.get_logger().info(
+                f"[{ns}] 优先级 {my_pri} > {owner_pri}，抢占走廊段 {segment_name}（{owner} 被挤入等待）。")
+            return True
+        # 同优先级或低优先级：排队等待
+        if ns not in self._segment_queue[segment_name]:
+            self._segment_queue[segment_name].append(ns)
+        return False
+
+    def release_segments(self, ns, segment_name=None):
+        """释放 ns 持有的走廊段。segment_name=None 释放所有。"""
+        if segment_name:
+            if self._segment_owner.get(segment_name) == ns:
+                del self._segment_owner[segment_name]
+            if ns in self._segment_queue.get(segment_name, []):
+                self._segment_queue[segment_name].remove(ns)
+        else:
+            for seg in list(self._segment_owner):
+                if self._segment_owner[seg] == ns:
+                    del self._segment_owner[seg]
+            for q in self._segment_queue.values():
+                if ns in q:
+                    q.remove(ns)
+        # 同时清除让行等待点
+        self._wait_target.pop(ns, None)
+
+    def promote_waiting(self):
+        """段释放后，将等待队列队首提升为新的段拥有者。"""
+        for seg_name, queue in self._segment_queue.items():
+            if seg_name not in self._segment_owner and queue:
+                promoted_ns = queue.pop(0)
+                self._segment_owner[seg_name] = promoted_ns
+                self.get_logger().info(
+                    f"[{promoted_ns}] 走廊段 {seg_name} 已释放，从等待队列提升为拥有者 → 恢复行驶。")
+                # 清除让行状态，恢复原导航目标
+                if promoted_ns in self._yielding:
+                    self._yielding.discard(promoted_ns)
+                    self._wait_target.pop(promoted_ns, None)
+                    self.reissue_goal(promoted_ns)
+
+    def nearest_wait_point(self, ns, segment_name):
+        """为 ns 在指定走廊段找到最近的等待点，让车停在段入口外等候。"""
+        agv = self.agv[ns]
+        if agv.pose is None:
+            return None
+        # 收集该走廊段对应的等待点
+        prefix = segment_name  # e.g. 'corridor_east'
+        candidates = [(wp_name, wp_xy) for wp_name, wp_xy in self.WAIT_POINTS.items()
+                      if wp_name.startswith(prefix)]
+        if not candidates:
+            # fallback：所有等待点中找最近的
+            candidates = list(self.WAIT_POINTS.items())
+        best_wp = None
+        best_d = float('inf')
+        for wp_name, wp_xy in candidates:
+            d = dist(agv.pose, wp_xy)
+            if d < best_d:
+                best_d = d
+                best_wp = wp_xy
+        return best_wp
+
+    def apply_traffic_rules(self):
+        """走廊段预约制路权（防撞核心）：每个走廊段同一时刻仅允许一台车通行。
+        AGV 进入走廊段前须预约，占用冲突时按任务优先级裁决，低优先级车在
+        段入口等待点停车让行，待高优先级车驶离后恢复——充电车优先级最高。
+        相比旧版基于半径的让行，段预约制可在车尚未接近时就确定性地互斥，
+        彻底避免窄道相遇/对向死锁。"""
+        # 1. 每台正在导航的车：检测所在/即将进入的走廊段并预约
         for ns in self.ns_list:
-            if ns in should_yield and ns not in self._yielding:
-                self._yielding.add(ns)
-                px, py = self.yield_pullaside_target(self.agv[ns])
-                self.send_goal_xy(ns, (px, py))              # 横向让到走廊内侧，让出单行道
-                self.get_logger().warn(
-                    f"[{ns}] 路径冲突·优先级低 → 横向让行至 ({px:.1f},{py:.1f})，让出车道。")
-            elif ns not in should_yield and ns in self._yielding:
-                self._yielding.discard(ns)
-                self.reissue_goal(ns)                        # 对方驶离，恢复原目标
-                self.get_logger().info(f"[{ns}] 冲突解除 → 恢复行驶。")
+            agv = self.agv[ns]
+            if agv.pose is None:
+                continue
+            # 空闲且已在待命点的车不参与段预约（避免长期占用走廊）
+            home = self.home.get(ns)
+            if agv.state == 'IDLE' and home and dist(agv.pose, home) <= self.standby_tol:
+                self.release_segments(ns)
+                continue
+            # 充电中的车不需要占用走廊段
+            if agv.state == 'CHARGING':
+                self.release_segments(ns)
+                continue
 
-    def yield_pullaside_target(self, agv):
-        """让行点：让出 x=±5.5 / y=±5.5 单行车道——靠近东/西墙(|x|大)就沿 x 朝中心(0)
-        横移 1m；否则沿 y 朝中心横移 1m。高优先级车即可沿原车道通过，避免"原地停"堵路相撞。"""
-        x, y = agv.pose
-        off = 1.1
-        if abs(x) >= abs(y):
-            return (x - off if x > 0 else x + off, y)
-        return (x, y - off if y > 0 else y + off)
+            current_segs = self.detect_segments(agv.pose)
+
+            # 释放已驶离的段
+            owned_segs = [seg for seg, owner in list(self._segment_owner.items()) if owner == ns]
+            for seg in owned_segs:
+                if seg not in current_segs:
+                    self.release_segments(ns, seg)
+                    self.get_logger().info(
+                        f"[{ns}] 驶离走廊段 {seg} → 释放。")
+
+            # 尝试预约当前所在的段
+            for seg in current_segs:
+                if self.try_reserve_segment(ns, seg):
+                    # 预约成功：若之前在让行，解除让行并恢复原目标
+                    if ns in self._yielding:
+                        self._yielding.discard(ns)
+                        self._wait_target.pop(ns, None)
+                        self.reissue_goal(ns)
+                        self.get_logger().info(f"[{ns}] 段 {seg} 预约成功 → 恢复行驶。")
+                else:
+                    # 预约失败：让行，停在最近等待点
+                    if ns not in self._yielding:
+                        self._yielding.add(ns)
+                        wp = self.nearest_wait_point(ns, seg)
+                        if wp:
+                            self._wait_target[ns] = wp
+                            self.send_goal_xy(ns, wp)
+                            self.get_logger().warn(
+                                f"[{ns}] 走廊段 {seg} 被 {self._segment_owner.get(seg)} 占用 → "
+                                f"让行至等待点 ({wp[0]:.1f},{wp[1]:.1f})。")
+                        else:
+                            self.get_logger().warn(
+                                f"[{ns}] 走廊段 {seg} 被占用，未找到合适等待点。")
+
+        # 2. 队列提升：段释放后把排队等候的车提升为拥有者
+        self.promote_waiting()
 
     def reissue_goal(self, ns):
         """让行结束后，按当前状态重新下发目标。"""
         agv = self.agv[ns]
-        if agv.state == 'TO_PICKUP' and agv.task:
+        if agv.state == 'TO_CHARGER':
+            tz = self.target_zone_of(ns)
+            if tz:
+                self.nav_to_zone(ns, tz)
+        elif agv.state == 'TO_PICKUP' and agv.task:
             self.nav_to_zone(ns, agv.task['pickup'])
         elif agv.state == 'TO_DROPOFF' and agv.task:
             self.nav_to_zone(ns, agv.task['dropoff'])
@@ -307,6 +458,8 @@ class FleetManager(Node):
         # candidates: idle AGVs with battery >= low_thr
         idle = [a for a in self.agv.values() if a.state == 'IDLE' and a.pose is not None
                 and a.battery >= self.low_thr and a.ns not in self._yielding]
+        if self.require_nav_ready:
+            idle = [a for a in idle if a.nav_ready]
         if not idle:
             return
 
@@ -475,6 +628,7 @@ class FleetManager(Node):
     def release_all(self, ns):
         for z in [z for z, o in list(self._zone_owner.items()) if o == ns]:
             del self._zone_owner[z]
+        self.release_segments(ns)  # 同时释放走廊段预约
 
     def send_goal_xy(self, ns, xy):
         """发布一个非区域的原始目标点（用于返回待命点）。"""
@@ -601,6 +755,7 @@ class FleetManager(Node):
         agvs = []
         for ns in self.ns_list:
             a = self.agv[ns]
+            home = self.home.get(ns)
             agvs.append({
                 'ns': ns,
                 'x': round(a.pose[0], 3) if a.pose else None,
@@ -613,6 +768,8 @@ class FleetManager(Node):
                 'on_charger': bool(a.on_charger),
                 'nav_ready': bool(a.nav_ready),    # Nav2 导航栈是否就绪（未就绪 Web 会标红）
                 'stuck': bool(a.stuck),            # 朝目标长时间无进展
+                'home_x': round(home[0], 3) if home else None,
+                'home_y': round(home[1], 3) if home else None,
             })
         zones = {
             name: {'cx': float(z['cx']), 'cy': float(z['cy']),
@@ -657,7 +814,7 @@ class FleetManager(Node):
                 anomalies.append({'level': 'error', 'ns': ns, 'type': '离线',
                                   'msg': '无位姿/未上报（Gazebo 未生成或里程计缺失）'})
                 continue
-            if not a.nav_ready:
+            if self.require_nav_ready and not a.nav_ready:
                 anomalies.append({'level': 'warn', 'ns': ns, 'type': '导航未就绪',
                                   'msg': 'Nav2 导航栈未激活'})
             if a.battery < self.low_thr and not a.on_charger and a.state != 'CHARGING':
@@ -667,8 +824,13 @@ class FleetManager(Node):
                 anomalies.append({'level': 'warn', 'ns': ns, 'type': '导航卡死',
                                   'msg': '朝目标长时间无进展（被堵/规划失败）'})
             if ns in self._yielding:
-                anomalies.append({'level': 'info', 'ns': ns, 'type': '让行中',
-                                  'msg': '路径冲突·优先级低，原地让行'})
+                wp = self._wait_target.get(ns)
+                if wp:
+                    anomalies.append({'level': 'info', 'ns': ns, 'type': '段等待',
+                                      'msg': f'路权等待中，停在等待点 ({wp[0]:.1f},{wp[1]:.1f})'})
+                else:
+                    anomalies.append({'level': 'info', 'ns': ns, 'type': '段等待',
+                                      'msg': '路权等待中'})
 
         payload = {
             'stamp': time.time(),
@@ -677,12 +839,15 @@ class FleetManager(Node):
             'zones': zones,
             'charger_zones': self.charger_zone_names,
             'zone_owner': dict(self._zone_owner),   # zone_name -> ns（区域预约，防撞可视化）
+            'segment_owner': dict(self._segment_owner),   # 走廊段拥有者
+            'segment_queue': {s: list(q) for s, q in self._segment_queue.items() if q},  # 走廊段等待队列
             'tasks': tasks,                         # 任务分配总览
             'idle_agvs': idle_agvs,                 # 空闲车列表（"是否有空闲小车"）
-            'yielding': sorted(self._yielding),     # 正在让行充电车的车（路径冲突·充电优先）
+            'yielding': sorted(self._yielding),     # 路权等待中的车（走廊段冲突）
             'collisions': self._collisions,         # 当前碰撞/危险接近对 [{a,b,d}]
             'collision_count': self.collision_count,  # 累计碰撞事件数
             'anomalies': anomalies,                 # 系统异常总览
+            'require_nav_ready': self.require_nav_ready, # 是否要求导航就绪
         }
         self.fleet_state_pub.publish(String(data=json.dumps(payload)))
 

@@ -97,6 +97,9 @@ main {
 .sw.charger { background: var(--orange); }
 .sw.zone { background: #5a6b80; }
 .sw.approach { background: transparent; border: 1.5px solid #cdd8e6; transform: rotate(45deg); border-radius: 0; width: 9px; height: 9px; }
+.sw.corridor { background: rgba(126, 138, 153, 0.15); border: 1.5px dashed rgba(126, 138, 153, 0.5); }
+.sw.waitpoint { background: #ffa733; border: 1.5px solid #1a212b; border-radius: 50%; }
+.sw.homepoint { background: transparent; border: 1.5px dashed var(--accent); border-radius: 50%; }
 .sw.path { background: linear-gradient(90deg, var(--accent) 0 60%, transparent 60%); border-radius: 0; }
 .sw.agv { background: var(--accent); border-radius: 50%; }
 

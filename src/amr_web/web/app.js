@@ -20,6 +20,27 @@ const WAREHOUSE = {
   charger: { cx: -5.5, cy: -5.5, sx: 2.0, sy: 2.0 },
 };
 
+const CORRIDOR_SEGMENTS = {
+  'corridor_east':      { x_min: 4.5,  x_max: 6.5,  y_min: -6.5, y_max: 6.5 },
+  'corridor_west':      { x_min: -6.5, x_max: -4.5, y_min: -6.5, y_max: 6.5 },
+  'corridor_north':     { x_min: -6.5, x_max: 6.5,  y_min: 4.5,  y_max: 6.5 },
+  'corridor_south':     { x_min: -6.5, x_max: 6.5,  y_min: -6.5, y_max: -4.5 },
+  'corridor_center_ns': { x_min: -1.0, x_max: 1.0,  y_min: -6.5, y_max: 6.5 },
+};
+
+const WAIT_POINTS = {
+  'corridor_east_south':    { x: 5.5,  y: -6.0 },
+  'corridor_east_north':    { x: 5.5,  y: 6.0 },
+  'corridor_west_south':    { x: -5.5, y: -6.0 },
+  'corridor_west_north':    { x: -5.5, y: 6.0 },
+  'corridor_north_east':    { x: 6.0,  y: 5.5 },
+  'corridor_north_west':    { x: -6.0, y: 5.5 },
+  'corridor_south_east':    { x: 6.0,  y: -5.5 },
+  'corridor_south_west':    { x: -6.0, y: -5.5 },
+  'corridor_center_south':  { x: 0.0,  y: -6.0 },
+  'corridor_center_north':  { x: 0.0,  y: 6.0 },
+};
+
 const AGV_COLORS = ['#3da9fc', '#ffa733', '#3ddc84', '#c87cff', '#ff7ca8'];
 
 // ---- 画布坐标变换 (世界 m <-> 像素，y 轴翻转) ----
@@ -236,8 +257,142 @@ function drawCollisions() {
   }
 }
 
+// ---- 走廊段与路权绘制 ----
+function drawCorridors() {
+  if (!latestState) return;
+  const owners = latestState.segment_owner || {};
+  const queues = latestState.segment_queue || {};
+
+  ctx.save();
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  for (const [name, seg] of Object.entries(CORRIDOR_SEGMENTS)) {
+    const cx = (seg.x_min + seg.x_max) / 2;
+    const cy = (seg.y_min + seg.y_max) / 2;
+    const w = seg.x_max - seg.x_min;
+    const h = seg.y_max - seg.y_min;
+
+    const owner = owners[name];
+    const queue = queues[name] || [];
+
+    // 基础颜色 (空闲)
+    let fillColor = 'rgba(126, 138, 153, 0.05)';
+    let borderColor = 'rgba(126, 138, 153, 0.2)';
+    let isReserved = false;
+
+    if (owner) {
+      isReserved = true;
+      const index = nsIndex[owner] !== undefined ? nsIndex[owner] : 0;
+      const ownerColor = AGV_COLORS[index % AGV_COLORS.length];
+      fillColor = hexToRgba(ownerColor, 0.12);
+      borderColor = hexToRgba(ownerColor, 0.5);
+    }
+
+    // 绘制填充
+    ctx.fillStyle = fillColor;
+    ctx.fillRect(toX(seg.x_min), toY(seg.y_max), toL(w), toL(h));
+
+    // 绘制虚线/实线边框
+    ctx.strokeStyle = borderColor;
+    ctx.lineWidth = 1.5;
+    if (isReserved) {
+      ctx.setLineDash([]);
+    } else {
+      ctx.setLineDash([4, 4]);
+    }
+    ctx.strokeRect(toX(seg.x_min), toY(seg.y_max), toL(w), toL(h));
+    ctx.setLineDash([]);
+
+    // 绘制文字标识
+    ctx.fillStyle = isReserved ? '#ffffff' : 'rgba(215, 224, 234, 0.4)';
+    const cleanName = name.replace('corridor_', '');
+    let label = cleanName;
+    if (owner) {
+      label += ` [${owner}]`;
+    }
+    if (queue.length > 0) {
+      label += ` (等:${queue.join(',')})`;
+    }
+    ctx.fillText(label, toX(cx), toY(cy));
+  }
+  ctx.restore();
+}
+
+// ---- 等待点绘制 ----
+function drawWaitPoints() {
+  ctx.save();
+  for (const [name, wp] of Object.entries(WAIT_POINTS)) {
+    const px = toX(wp.x);
+    const py = toY(wp.y);
+    const r = 4;
+
+    // 绘制圆圈
+    ctx.strokeStyle = '#ffa733';
+    ctx.fillStyle = '#1a212b';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // 内部实心小点
+    ctx.fillStyle = '#ffa733';
+    ctx.beginPath();
+    ctx.arc(px, py, 1.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// 辅助函数：将 #hex 颜色转换为 rgba
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// ---- 待命点绘制 ----
+function drawHomePoints() {
+  if (!latestState) return;
+  latestState.agvs.forEach((a) => {
+    if (a.home_x === undefined || a.home_x === null) return;
+    const color = AGV_COLORS[(nsIndex[a.ns] || 0) % AGV_COLORS.length];
+    const px = toX(a.home_x);
+    const py = toY(a.home_y);
+    const r = 5;
+
+    ctx.save();
+    // 绘制圆圈
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath();
+    ctx.arc(px, py, r + 2, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 内部实心圆点
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(px, py, 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 待命点标签
+    ctx.fillStyle = 'rgba(215, 224, 234, 0.5)';
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${a.ns}·待命`, px, py - 10);
+    ctx.restore();
+  });
+}
+
 function render() {
   drawStatic(lastZones);
+  drawCorridors();
+  drawWaitPoints();
+  drawHomePoints();
   drawPaths();
   drawTrails();
   if (latestState) drawAgvs(latestState.agvs);
@@ -272,15 +427,17 @@ function renderFleet(state) {
     const color = AGV_COLORS[(nsIndex[a.ns] || 0) % AGV_COLORS.length];
     const bpct = Math.round((a.battery || 0) * 100);
     const pos = (a.x === null) ? '—' : `${a.x.toFixed(1)}, ${a.y.toFixed(1)}`;
+    const homePos = (a.home_x === undefined || a.home_x === null) ? '—' : `${a.home_x.toFixed(1)}, ${a.home_y.toFixed(1)}`;
     const sel = a.ns === selectedNs ? ' class="sel"' : '';
     const yieldTag = yielding.includes(a.ns) ? ' <span class="badge yield">让行</span>' : '';
-    const navTag = (a.nav_ready === false) ? ' <span class="badge navdown">导航未就绪</span>' : '';
+    const navTag = (state.require_nav_ready && a.nav_ready === false) ? ' <span class="badge navdown">导航未就绪</span>' : '';
     return `<tr data-ns="${a.ns}"${sel}>
       <td><span style="color:${color};font-weight:700">●</span> ${a.ns}${a.task ? ` <small class="muted">[${a.task}]</small>` : ''}</td>
       <td><span class="badge ${a.state}">${a.state}</span>${yieldTag}${navTag}</td>
       <td><span class="batt"><span class="bar"><i style="width:${bpct}%;background:${batteryColor(a.battery)}"></i></span>${bpct}%</span></td>
       <td>${a.carrying ? '📦' : '—'}</td>
       <td class="muted">${pos}</td>
+      <td class="muted">${homePos}</td>
     </tr>`;
   }).join('');
 
@@ -288,6 +445,49 @@ function renderFleet(state) {
   body.querySelectorAll('tr[data-ns]').forEach((tr) => {
     tr.addEventListener('click', () => selectRobot(tr.getAttribute('data-ns')));
   });
+}
+
+// ---- 路权与走廊状态表格 ----
+function renderRow(state) {
+  const body = document.getElementById('rowBody');
+  const owners = state.segment_owner || {};
+  const queues = state.segment_queue || {};
+
+  // 显示路权总状态
+  let activeLocks = 0;
+  for (const name of Object.keys(CORRIDOR_SEGMENTS)) {
+    if (owners[name]) activeLocks++;
+  }
+  document.getElementById('rowStatus').textContent = activeLocks > 0
+    ? `· 已锁 ${activeLocks} 段`
+    : '· 全路段空闲';
+
+  body.innerHTML = Object.entries(CORRIDOR_SEGMENTS).map(([name, seg]) => {
+    const owner = owners[name];
+    const queue = queues[name] || [];
+
+    const ownerColor = owner ? AGV_COLORS[(nsIndex[owner] !== undefined ? nsIndex[owner] : 0) % AGV_COLORS.length] : null;
+    const ownerCell = owner
+      ? `<span style="color:${ownerColor};font-weight:700">●</span> ${owner}`
+      : '<span class="badge IDLE">空闲</span>';
+
+    const queueCell = queue.length
+      ? queue.map(q => {
+          const qColor = AGV_COLORS[(nsIndex[q] !== undefined ? nsIndex[q] : 0) % AGV_COLORS.length];
+          return `<span style="color:${qColor};font-weight:700">●</span> ${q}`;
+        }).join(', ')
+      : '<span class="muted">—</span>';
+
+    const bounds = `x: [${seg.x_min}, ${seg.x_max}], y: [${seg.y_min}, ${seg.y_max}]`;
+    const cleanName = name.replace('corridor_', '');
+
+    return `<tr>
+      <td><b>${cleanName}</b></td>
+      <td>${ownerCell}</td>
+      <td>${queueCell}</td>
+      <td class="muted">${bounds}</td>
+    </tr>`;
+  }).join('');
 }
 
 // ---- 任务分配情况 ----
@@ -482,6 +682,7 @@ function connect() {
       });
       if (state.zones) { lastZones = state.zones; populateZones(state.zones); }
       renderFleet(state);
+      renderRow(state);
       renderTasks(state);
       renderAnomalies(state);
       updateCollisionAlarm(state);

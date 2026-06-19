@@ -15,32 +15,37 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, ExecuteProcess, TimerAction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, PathJoinSubstitution
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 NS = 'agv1'
 
-TELEOP_CMD = (
-    'source /opt/ros/humble/setup.bash && '
-    'source /workspace/colcon_ws/install/setup.bash && '
-    f'ros2 run teleop_twist_keyboard teleop_twist_keyboard '
-    f'--ros-args --remap cmd_vel:=/{NS}/cmd_vel'
-)
-
 
 def generate_launch_description():
     pkg_amr = FindPackageShare('amr_description')
+    pkg_amr_dir = get_package_share_directory('amr_description')
+
+    # Dynamically find workspace setup.bash path
+    ws_install_dir = os.path.dirname(os.path.dirname(os.path.dirname(pkg_amr_dir)))
+    setup_file = os.path.join(ws_install_dir, 'setup.bash')
+    if not os.path.exists(setup_file):
+        setup_file = '/home/li/GazeboLib/install/setup.bash'
+
+    teleop_cmd = (
+        'source /opt/ros/humble/setup.bash && '
+        f'source {setup_file} && '
+        f'ros2 run teleop_twist_keyboard teleop_twist_keyboard '
+        f'--ros-args --remap cmd_vel:=/{NS}/cmd_vel'
+    )
 
     xacro_file = PathJoinSubstitution([pkg_amr, 'urdf', 'amr.urdf.xacro'])
     robot_description = Command(['xacro ', xacro_file, ' namespace:=', NS])
 
-    world = os.path.join(
-        get_package_share_directory('amr_description'),
-        'worlds', 'map.world'
-    )
+    default_world = os.path.join(pkg_amr_dir, 'worlds', 'map.world')
+    world = LaunchConfiguration('world')
 
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -50,6 +55,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument('world', default_value=default_world,
+                              description='Gazebo world file to map.'),
         gazebo,
 
         # Publishes robot_description on /robot_description
@@ -122,7 +129,7 @@ def generate_launch_description():
             period=5.0,
             actions=[
                 ExecuteProcess(
-                    cmd=['xterm', '-title', 'Teleop', '-e', 'bash', '-c', TELEOP_CMD],
+                    cmd=['xterm', '-title', 'Teleop', '-e', 'bash', '-c', teleop_cmd],
                     output='screen',
                 ),
             ],
