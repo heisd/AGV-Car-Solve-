@@ -281,3 +281,43 @@ TF：map ─(AMCL)─► <ns>/odom ─(odom_sim_filter)─► <ns>/base_footprin
 18. **`ros2 run X & kill -9 $!` 仍会留孤儿**：`kill -9` 杀的是 `ros2 run` 包装进程，真正的节点是其子进程、
     会被托孤。清理用 `pkill -x <node_comm>`（注意 comm 截断 15 字符）或对包装进程发 **SIGINT**。
     （与问题 17 同源：SIGKILL 不传播给子进程。）
+
+## 12. 路径冲突·充电优先·自动回充·碰撞检测（防撞强化）
+
+围绕"多车实际运行会撞车 / 充电流程 / 路径冲突优先级"做的一轮强化与排障。
+
+### 新增/改动
+- **充电速度** `battery_sim.charge_per_second` 0.02→**0.10**（约 4s 充过阈值差，原来太慢看不出来）；
+  怠速耗电 `drain_per_second_idle` 0.0002→**0.001**（电量可见变化）。
+- **充电对接半径** `charger_dock_monitor.enter_radius` 0.8→**1.2**、exit 1.1→**1.5**。
+  原因：充电接近点距充电中心 0.7m，加 Nav2 到点容差 0.25m，小车实际停在距中心 ~0.97m 处，
+  >0.8m 旧半径 → 判定未对接 → battery_sim 不充电（fleet 以为在充、实则电量不升）。放大后可靠对接。
+- **通用优先级让行（碰撞预防核心）** `fleet_manager.apply_traffic_priority()`：
+  任意两车进入 `yield_radius`(1.6m) 时，**优先级低的一方原地停车让行**，对方驶离后恢复原目标。
+  优先级：充电(TO_CHARGER/CHARGING)=5 > 送货(TO_DROPOFF/UNLOADING)=4 > 取货(TO_PICKUP/LOADING)=3 > 空闲=1；
+  平级按 ns 字典序，仅一方让行避免死锁。**充电车享最高优先级**（用户要求：缺电车不能被堵）。
+  让行中跳过常规重发、不参与任务分配；恢复时 `reissue_goal()` 按状态重下目标。
+- **碰撞检测 + 告警 + 前端显示** `fleet_manager.check_collisions()`：两车中心距 < `collision_dist`(0.55m)
+  即判危险接近，**边沿触发 ERROR 告警**(→Web 异常日志)，并在 `/fleet/state` 发布 `collisions`/`collision_count`。
+  Web：地图上碰撞两车间画红线+红圈，标题红色"碰撞 N"角标，地图上方红色闪烁告警条。
+- **导航就绪显示** `nav2_goal_bridge` 发 `/<ns>/nav_ready`(Nav2 激活前 False)；`fleet_manager` 汇总进
+  `/fleet/state`；Web 车队表对未就绪车标红"导航未就绪"。（满足"导航状态未加载在 Web 显示"）
+
+### 关键排障（启动健壮性 — 修 agv2/agv3 不动）
+19. **Gazebo `/spawn_entity` 服务慢 → spawn 超时 → 小车不生成**：机器长时间运行/WSL 重启后，
+    gazebo 加载世界(20货架+模型)>38s，`spawn_entity.py` 默认 30s 等待超时退出 → 三车不生成 →
+    无 ground_truth → AMCL 无法定位（连锁全坏）。→ **修复**：spawn 加 `-timeout 120`、起始延后到 8/11/14s。
+20. **Nav2 早于 spawn 启动 → 后启动的车导航激活失败**（agv2 典型不动）：原 Nav2 按固定定时器
+    12/24/36s 启动，与被慢 gazebo 推迟的 spawn 脱钩，Nav2(AMCL/costmap) 在机器人还没生成时就激活→失败。
+    → **修复**：改 **事件驱动**——`RegisterEventHandler(OnProcessExit(spawn))`，每车 **spawn 成功后**才启动其 Nav2。
+21. **3 套 Nav2 容器同时加载组合节点 → `load_node` 超时**（agv3 的 bt_navigator/amcl 加载失败→导航未就绪）：
+    composition 下三容器并发 `load_node` 会丢响应。→ **缓解**：on_exit 内按车号 **2/17/32s 大错峰**，
+    每套 Nav2 间隔 ~15s 顺序加载。实测 agv1/agv2 稳定就绪；**agv3(第3套)在本机 WSL2 仍偶发某个组合节点
+    (amcl) 加载失败** → 这是单机 8GB/16核 跑 3 套完整 Nav2 的资源/时序极限，非僵尸问题（新 WSL 仍现）。
+    `nav_ready` 红标会如实暴露未就绪的车。**结论：2 车在本机完全可靠；3 车可用但第 3 套 Nav2 偶发未就绪。**
+
+### 验证（headless）
+- agv1/agv2：`nav_ready=True`、成功导航到各自待命点；3 车场景下 agv3 因上条偶发 `导航未就绪`。
+- 碰撞检测：实测捕获 `agv1 与 agv2 危险接近 0.44m，累计 1 次`（功能正确）。
+- 通用优先级让行 + 回充全流程（快充+可靠对接）：以 `num_agvs:=2` 复现验证（agv1 低电去充电享最高优先级，
+  agv2 让行 → 碰撞预防；agv1 对接后电量按 0.10/s 回升至 0.60 → 回 IDLE）。

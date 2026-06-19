@@ -57,6 +57,12 @@ class Nav2GoalBridge:
         self._reached_pub = self.nav.create_publisher(
             Bool, f'{ns_prefix}/goal_reached', 10
         )
+        # 导航就绪状态：Nav2(AMCL+bt_navigator) 激活前为 False，激活后为 True。
+        # 2Hz 周期发布（兼容 fleet_manager 重启后重新拿到状态），供 Web 显示"导航未就绪"。
+        self._ready_pub = self.nav.create_publisher(
+            Bool, f'{ns_prefix}/nav_ready', 10
+        )
+        self.nav.create_timer(0.5, lambda: self._ready_pub.publish(Bool(data=self._nav2_active)))
 
         # Subscriber — stores goals; execution deferred until Nav2 is active
         self.nav.create_subscription(

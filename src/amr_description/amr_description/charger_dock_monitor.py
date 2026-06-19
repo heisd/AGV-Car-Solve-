@@ -36,8 +36,10 @@ class ChargerDockMonitor(Node):
         self.declare_parameter('charger_centers_xy', [-20.0, -10.0, 20.0, -10.0])
 
         # Detection tuning
-        self.declare_parameter('enter_radius', 0.8)          # m
-        self.declare_parameter('exit_radius', 1.1)           # m (for hysteresis)
+        # enter_radius 必须覆盖「充电接近点到充电中心的距离(0.7m) + Nav2 到点容差(0.25m)」，
+        # 否则小车停在接近点却判定未对接、电量不回升。取 1.2m 留足裕量。
+        self.declare_parameter('enter_radius', 1.2)          # m
+        self.declare_parameter('exit_radius', 1.5)           # m (for hysteresis)
         self.declare_parameter('min_dock_dwell_sec', 0.5)    # s
         self.declare_parameter('max_linear_speed', 0.15)     # m/s
         self.declare_parameter('publish_rate_hz', 5.0)       # Hz

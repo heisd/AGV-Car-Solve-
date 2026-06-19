@@ -20,7 +20,10 @@
 
   <main>
     <section class="panel map-panel">
-      <div class="panel-title">仓库实时地图 <small>(俯视，单位 m · Nav2 路径)</small></div>
+      <div class="panel-title">仓库实时地图 <small>(俯视，单位 m · Nav2 路径)</small>
+        <span id="collisionBadge" class="collision-badge" style="display:none"></span>
+      </div>
+      <div id="collisionAlarm" class="collision-alarm" style="display:none"></div>
       <canvas id="map" width="600" height="600"></canvas>
       <div id="manualHint" class="manual-hint">点击下方车队表中的某台车，再点击地图即可手动导航。</div>
       <div class="legend">
@@ -48,6 +51,18 @@
         <button id="addTaskBtn" class="primary" disabled>下发任务</button>
         <div id="formMsg" class="form-msg"></div>
         <div class="queue">待分配任务队列：<b id="queueCount">-</b></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">任务分配情况 <small id="idleInfo" class="muted"></small></div>
+        <table id="taskTable">
+          <thead>
+            <tr><th>任务编号</th><th>小车编号</th><th>运行状态</th><th>任务内容</th></tr>
+          </thead>
+          <tbody id="taskBody">
+            <tr><td colspan="4" class="muted">暂无任务…</td></tr>
+          </tbody>
+        </table>
       </div>
 
       <div class="panel">

@@ -40,8 +40,8 @@ class BatterySim(Node):
         self.declare_parameter('initial_charge', 1.0)            # 0..1
         self.declare_parameter('publish_rate_hz', 2.0)           # Hz
         self.declare_parameter('drain_per_meter', 0.005)         # fraction per meter
-        self.declare_parameter('drain_per_second_idle', 0.0002)  # fraction per second
-        self.declare_parameter('charge_per_second', 0.02)        # fraction per second while charging
+        self.declare_parameter('drain_per_second_idle', 0.001)   # fraction per second（怠速耗电，可见但不至于太快）
+        self.declare_parameter('charge_per_second', 0.10)        # fraction per second while charging（充电速度，0.10≈10s 充满阈值差）
         self.declare_parameter('nominal_voltage', 24.0)          # V
         self.declare_parameter('design_capacity_Ah', 20.0)       # Ah
         self.declare_parameter('battery_low_threshold', 0.2)     # 20%

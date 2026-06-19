@@ -31,6 +31,7 @@ class AGVState:
         self.task = None  # {'id','pickup','dropoff','load_time','unload_time'}
         self.state_since = time.time()
         self.carrying = False
+        self.nav_ready = False  # 该车 Nav2(导航栈) 是否已激活就绪
 
 class FleetManager(Node):
     """
@@ -114,6 +115,7 @@ class FleetManager(Node):
             self.carry_pub[ns] = self.create_publisher(Bool, f'/{ns}/carrying_load', 10)
             self.create_subscription(Odometry, f'/{ns}/ground_truth', lambda msg, ns=ns: self.cb_odom(ns, msg), 10)
             self.create_subscription(Bool, f'/{ns}/on_charger', lambda msg, ns=ns: self.cb_on_charger(ns, msg), 10)
+            self.create_subscription(Bool, f'/{ns}/nav_ready', lambda msg, ns=ns: self.cb_nav_ready(ns, msg), 10)
             # Battery
             if self.batt_topic_type in ('auto','battery_state'):
                 self.create_subscription(BatteryState, f'/{ns}/battery_state', lambda msg, ns=ns: self.cb_batt_state(ns, msg), 10)
@@ -137,8 +139,21 @@ class FleetManager(Node):
 
         # 多车防撞 — 区域互斥预约：一个取/卸货/充电区同一时刻只允许一台车作为目标。
         self._zone_owner: dict = {}              # zone_name -> ns
-        self._home_sent: dict = {ns: False for ns in self.ns_list}
+        self._home_last_sent: dict = {ns: 0.0 for ns in self.ns_list}
+        self._home_resend_interval = 12.0        # s，空闲回待命点的重发间隔（卡住会重试）
         self.standby_tol = 0.6                   # m，到待命点的容差
+
+        # 充电优先让行：去充电的车(TO_CHARGER)在路径冲突时享有更高优先级，
+        # 其它车进入其 yield_radius 内则原地停车让行，待充电车通过后恢复。
+        self._yielding: set = set()              # 当前正在让行的车 ns
+        self.yield_radius = 1.6                  # m，进入此半径触发让行
+
+        # 碰撞检测：两车中心距 < collision_dist 视为碰撞/危险接近，
+        # 边沿触发告警(WARN→Web异常日志)，并在 /fleet/state 发布当前碰撞对供前端显示。
+        self.collision_dist = 0.55               # m（车体半径 0.30，<0.55 即重叠/危险）
+        self._collisions: list = []              # [{'a','b','d'}]
+        self._collision_pairs: set = set()       # 已告警的碰撞对（去抖）
+        self.collision_count = 0                 # 累计碰撞事件数
 
         # ---- Web / dispatch-center interface (consumed by the web operator panel via rosbridge) ----
         #   OUT: /fleet/state   (std_msgs/String, JSON)  full fleet snapshot, published ~3 Hz
@@ -163,6 +178,9 @@ class FleetManager(Node):
     def cb_on_charger(self, ns, msg: Bool):
         self.agv[ns].on_charger = bool(msg.data)
 
+    def cb_nav_ready(self, ns, msg: Bool):
+        self.agv[ns].nav_ready = bool(msg.data)
+
     def cb_batt_state(self, ns, msg: BatteryState):
         # percentage may be 0..100 or 0..1 depending on your battery_sim; normalize
         pct = msg.percentage
@@ -185,8 +203,89 @@ class FleetManager(Node):
         for ns in self.ns_list:
             self.run_agv(ns)
 
+        # 路径冲突·优先级让行（碰撞预防；充电车优先级最高）
+        self.apply_traffic_priority()
+
+        # 碰撞检测（监控两车危险接近，告警 + 发布给前端）
+        self.check_collisions()
+
         # Assign tasks to idle AGVs
         self.assign_tasks()
+
+    # ======== 碰撞检测 ========
+
+    def check_collisions(self):
+        """检测两车中心距 < collision_dist 的碰撞/危险接近；边沿触发 WARN 告警。"""
+        cols = []
+        active = set()
+        names = [ns for ns in self.ns_list if self.agv[ns].pose is not None]
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                a, b = names[i], names[j]
+                d = dist(self.agv[a].pose, self.agv[b].pose)
+                if d < self.collision_dist:
+                    pair = tuple(sorted((a, b)))
+                    cols.append({'a': pair[0], 'b': pair[1], 'd': round(d, 2)})
+                    active.add(pair)
+                    if pair not in self._collision_pairs:   # 新发生 → 告警一次
+                        self.collision_count += 1
+                        self.get_logger().error(
+                            f"⚠ 碰撞检测：{pair[0]} 与 {pair[1]} 危险接近 (间距 {d:.2f} m < "
+                            f"{self.collision_dist} m)！累计 {self.collision_count} 次。")
+        self._collision_pairs = active
+        self._collisions = cols
+
+    # ======== 路径冲突·优先级让行（碰撞预防） ========
+
+    # 状态优先级（数值大者优先通行，低者让行）：
+    #   充电(去充电/充电中) > 载货送货 > 取货 > 空闲返航
+    PRIORITY = {
+        'TO_CHARGER': 5, 'CHARGING': 5,
+        'TO_DROPOFF': 4, 'UNLOADING': 4,
+        'TO_PICKUP': 3, 'LOADING': 3,
+        'IDLE': 1,
+    }
+
+    def robot_priority(self, agv):
+        return self.PRIORITY.get(agv.state, 1)
+
+    def apply_traffic_priority(self):
+        """通用优先级让行（防撞核心）：任意两车进入 yield_radius 时，优先级低的一方
+        原地停车让行，待对方驶离再恢复——充电车优先级最高。仅靠 Nav2 costmap 在窄道
+        相遇会撞，这里在调度层加确定性让行规则。相等优先级按 ns 字典序，仅一方让行避免死锁。"""
+        moving = [self.agv[ns] for ns in self.ns_list if self.agv[ns].pose is not None]
+        should_yield = set()
+        for i in range(len(moving)):
+            for j in range(i + 1, len(moving)):
+                a, b = moving[i], moving[j]
+                if dist(a.pose, b.pose) > self.yield_radius:
+                    continue
+                pa, pb = self.robot_priority(a), self.robot_priority(b)
+                if pa != pb:
+                    loser = a if pa < pb else b
+                else:
+                    loser = a if a.ns > b.ns else b   # 平级：ns 大者让，确定且唯一
+                should_yield.add(loser.ns)
+
+        for ns in self.ns_list:
+            if ns in should_yield and ns not in self._yielding:
+                self._yielding.add(ns)
+                self.send_goal_xy(ns, self.agv[ns].pose)     # 原地停车让行
+                self.get_logger().warn(f"[{ns}] 路径冲突·优先级低 → 原地让行等待。")
+            elif ns not in should_yield and ns in self._yielding:
+                self._yielding.discard(ns)
+                self.reissue_goal(ns)                        # 对方驶离，恢复原目标
+                self.get_logger().info(f"[{ns}] 冲突解除 → 恢复行驶。")
+
+    def reissue_goal(self, ns):
+        """让行结束后，按当前状态重新下发目标。"""
+        agv = self.agv[ns]
+        if agv.state == 'TO_PICKUP' and agv.task:
+            self.nav_to_zone(ns, agv.task['pickup'])
+        elif agv.state == 'TO_DROPOFF' and agv.task:
+            self.nav_to_zone(ns, agv.task['dropoff'])
+        elif agv.state == 'IDLE':
+            self._home_last_sent[ns] = 0.0        # 下一拍重发回待命点
 
     # ======== Assignment ========
 
@@ -194,7 +293,8 @@ class FleetManager(Node):
         if not self.task_queue:
             return
         # candidates: idle AGVs with battery >= low_thr
-        idle = [a for a in self.agv.values() if a.state == 'IDLE' and a.pose is not None and a.battery >= self.low_thr]
+        idle = [a for a in self.agv.values() if a.state == 'IDLE' and a.pose is not None
+                and a.battery >= self.low_thr and a.ns not in self._yielding]
         if not idle:
             return
 
@@ -223,7 +323,7 @@ class FleetManager(Node):
             agv.state_since = time.time()
             self.reserve(task['pickup'], agv.ns)
             self.reserve(task.get('dropoff'), agv.ns)
-            self._home_sent[agv.ns] = False
+            self._home_last_sent[agv.ns] = 0.0
             self.nav_to_zone(agv.ns, task['pickup'])
             self.get_logger().info(
                 f"[{agv.ns}] Assigned task {task.get('id','?')} → pickup {task['pickup']} "
@@ -262,17 +362,16 @@ class FleetManager(Node):
         if agv.state == 'IDLE':
             # Publish carrying false just to be explicit
             self.set_carrying(ns, False)
-            # 空闲且不在待命点 → 回各自独立的待命点，清空作业区、分散车辆（防撞核心）
+            # 空闲且不在待命点 → 回各自独立的待命点，清空作业区、分散车辆（防撞核心）。
+            # 定时重发：若回程导航被中止/卡住，每 _home_resend_interval 重试一次。
             home = self.home.get(ns)
-            if home and agv.pose is not None:
-                if dist(agv.pose, home) > self.standby_tol:
-                    if not self._home_sent[ns]:
-                        self.send_goal_xy(ns, home)
-                        self._home_sent[ns] = True
-                        self.get_logger().info(
-                            f"[{ns}] Idle — 返回待命点 ({home[0]:.1f}, {home[1]:.1f}).")
-                else:
-                    self._home_sent[ns] = False   # 已到位；被挤走后可再次回位
+            if (ns not in self._yielding and home and agv.pose is not None
+                    and dist(agv.pose, home) > self.standby_tol):
+                if now - self._home_last_sent.get(ns, 0.0) >= self._home_resend_interval:
+                    self.send_goal_xy(ns, home)
+                    self._home_last_sent[ns] = now
+                    self.get_logger().info(
+                        f"[{ns}] Idle — 返回待命点 ({home[0]:.1f}, {home[1]:.1f}).")
             return
 
         if agv.state == 'TO_CHARGER':
@@ -332,7 +431,7 @@ class FleetManager(Node):
                 agv.task = None
                 agv.state = 'IDLE'
                 agv.state_since = now
-                self._home_sent[ns] = False    # 触发下一拍返回待命点
+                self._home_last_sent[ns] = 0.0  # 触发下一拍立即返回待命点
             return
 
     # ======== Helpers ========
@@ -396,6 +495,8 @@ class FleetManager(Node):
         robot is travelling normally (nav2_goal_bridge ignores those anyway)."""
         agv = self.agv[ns]
         if not zone_name or agv.pose is None:
+            return
+        if ns in self._yielding:               # 让行中：保持停车，不重发
             return
         gx, gy = self.goal_xy_of(zone_name)
         d = dist(agv.pose, (gx, gy))
@@ -496,6 +597,7 @@ class FleetManager(Node):
                 'task': (a.task.get('id') if a.task else None),
                 'carrying': bool(a.carrying),
                 'on_charger': bool(a.on_charger),
+                'nav_ready': bool(a.nav_ready),    # Nav2 导航栈是否就绪（未就绪 Web 会标红）
             })
         zones = {
             name: {'cx': float(z['cx']), 'cy': float(z['cy']),
@@ -503,6 +605,31 @@ class FleetManager(Node):
                    'gx': float(z.get('gx', z['cx'])), 'gy': float(z.get('gy', z['cy']))}
             for name, z in self.zones.items()
         }
+
+        # 任务分配总览（供前端"任务分配情况"面板）：已分配的（在某台车上）+ 排队中的（未分配）
+        tasks = []
+        for ns in self.ns_list:
+            a = self.agv[ns]
+            if a.task:
+                tasks.append({
+                    'id': str(a.task.get('id', '?')),
+                    'pickup': a.task.get('pickup'),
+                    'dropoff': a.task.get('dropoff'),
+                    'status': 'assigned',      # 已分配/执行中
+                    'agv': ns,
+                    'agv_state': a.state,
+                })
+        for t in self.task_queue:
+            tasks.append({
+                'id': str(t.get('id', '?')),
+                'pickup': t.get('pickup'),
+                'dropoff': t.get('dropoff'),
+                'status': 'queued',            # 排队中，等待空闲车
+                'agv': None,
+                'agv_state': None,
+            })
+        idle_agvs = [ns for ns in self.ns_list if self.agv[ns].state == 'IDLE']
+
         payload = {
             'stamp': time.time(),
             'agvs': agvs,
@@ -510,6 +637,11 @@ class FleetManager(Node):
             'zones': zones,
             'charger_zones': self.charger_zone_names,
             'zone_owner': dict(self._zone_owner),   # zone_name -> ns（区域预约，防撞可视化）
+            'tasks': tasks,                         # 任务分配总览
+            'idle_agvs': idle_agvs,                 # 空闲车列表（"是否有空闲小车"）
+            'yielding': sorted(self._yielding),     # 正在让行充电车的车（路径冲突·充电优先）
+            'collisions': self._collisions,         # 当前碰撞/危险接近对 [{a,b,d}]
+            'collision_count': self.collision_count,  # 累计碰撞事件数
         }
         self.fleet_state_pub.publish(String(data=json.dumps(payload)))
 

@@ -214,11 +214,51 @@ function drawAgvs(agvs) {
   });
 }
 
+function drawCollisions() {
+  if (!latestState || !latestState.collisions) return;
+  const byNs = {};
+  latestState.agvs.forEach((a) => { byNs[a.ns] = a; });
+  for (const c of latestState.collisions) {
+    const A = byNs[c.a], B = byNs[c.b];
+    if (!A || !B || A.x === null || B.x === null) continue;
+    ctx.strokeStyle = '#ff3b3b';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(toX(A.x), toY(A.y));
+    ctx.lineTo(toX(B.x), toY(B.y));
+    ctx.stroke();
+    for (const P of [A, B]) {
+      ctx.beginPath();
+      ctx.arc(toX(P.x), toY(P.y), 15, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+}
+
 function render() {
   drawStatic(lastZones);
   drawPaths();
   drawTrails();
   if (latestState) drawAgvs(latestState.agvs);
+  drawCollisions();
+}
+
+function updateCollisionAlarm(state) {
+  const cols = state.collisions || [];
+  const badge = document.getElementById('collisionBadge');
+  const alarm = document.getElementById('collisionAlarm');
+  if (cols.length) {
+    badge.style.display = '';
+    badge.textContent = `⚠ 碰撞 ${cols.length}`;
+    alarm.style.display = '';
+    alarm.textContent = '⚠ 碰撞告警：'
+      + cols.map((c) => `${c.a}↔${c.b} (${c.d}m)`).join('，')
+      + `　|　累计 ${state.collision_count || 0} 次`;
+  } else {
+    badge.style.display = 'none';
+    alarm.style.display = 'none';
+  }
 }
 
 // ---- 车队表 + 队列 ----
@@ -227,14 +267,17 @@ function renderFleet(state) {
   document.getElementById('agvCount').textContent = `(${state.agvs.length} 台)`;
   document.getElementById('queueCount').textContent = state.queued_tasks;
 
+  const yielding = state.yielding || [];
   body.innerHTML = state.agvs.map((a) => {
     const color = AGV_COLORS[(nsIndex[a.ns] || 0) % AGV_COLORS.length];
     const bpct = Math.round((a.battery || 0) * 100);
     const pos = (a.x === null) ? '—' : `${a.x.toFixed(1)}, ${a.y.toFixed(1)}`;
     const sel = a.ns === selectedNs ? ' class="sel"' : '';
+    const yieldTag = yielding.includes(a.ns) ? ' <span class="badge yield">让行</span>' : '';
+    const navTag = (a.nav_ready === false) ? ' <span class="badge navdown">导航未就绪</span>' : '';
     return `<tr data-ns="${a.ns}"${sel}>
       <td><span style="color:${color};font-weight:700">●</span> ${a.ns}${a.task ? ` <small class="muted">[${a.task}]</small>` : ''}</td>
-      <td><span class="badge ${a.state}">${a.state}</span></td>
+      <td><span class="badge ${a.state}">${a.state}</span>${yieldTag}${navTag}</td>
       <td><span class="batt"><span class="bar"><i style="width:${bpct}%;background:${batteryColor(a.battery)}"></i></span>${bpct}%</span></td>
       <td>${a.carrying ? '📦' : '—'}</td>
       <td class="muted">${pos}</td>
@@ -245,6 +288,47 @@ function renderFleet(state) {
   body.querySelectorAll('tr[data-ns]').forEach((tr) => {
     tr.addEventListener('click', () => selectRobot(tr.getAttribute('data-ns')));
   });
+}
+
+// ---- 任务分配情况 ----
+const STATE_LABEL = {
+  IDLE: '空闲', TO_PICKUP: '前往取货', LOADING: '装货中',
+  TO_DROPOFF: '前往卸货', UNLOADING: '卸货中',
+  TO_CHARGER: '前往充电', CHARGING: '充电中',
+};
+
+function renderTasks(state) {
+  const tasks = state.tasks || [];
+  const idle = state.idle_agvs || [];
+
+  // 是否有空闲小车
+  const idleEl = document.getElementById('idleInfo');
+  idleEl.textContent = idle.length
+    ? `· 空闲车 ${idle.length}：${idle.join(', ')}`
+    : '· 无空闲车';
+  idleEl.className = idle.length ? 'ok-text' : 'muted';
+
+  const body = document.getElementById('taskBody');
+  if (!tasks.length) {
+    body.innerHTML = '<tr><td colspan="4" class="muted">暂无任务…</td></tr>';
+    return;
+  }
+  // 已分配在前，排队在后
+  const ordered = tasks.slice().sort((a, b) => (a.status === b.status ? 0 : a.status === 'assigned' ? -1 : 1));
+  body.innerHTML = ordered.map((t) => {
+    const agvCell = t.agv
+      ? `<span style="color:${AGV_COLORS[(nsIndex[t.agv] || 0) % AGV_COLORS.length]};font-weight:700">●</span> ${t.agv}`
+      : '<span class="muted">未分配</span>';
+    const stateCell = t.status === 'assigned'
+      ? `<span class="badge ${t.agv_state}">${STATE_LABEL[t.agv_state] || t.agv_state}</span>`
+      : '<span class="badge queued">排队中</span>';
+    return `<tr>
+      <td><b>${escapeHtml(t.id)}</b></td>
+      <td>${agvCell}</td>
+      <td>${stateCell}</td>
+      <td class="muted">${escapeHtml(t.pickup || '?')} → ${escapeHtml(t.dropoff || '?')}</td>
+    </tr>`;
+  }).join('');
 }
 
 // ---- 区域下拉框 (仅在 zones 变化时重建) ----
@@ -375,6 +459,8 @@ function connect() {
       });
       if (state.zones) { lastZones = state.zones; populateZones(state.zones); }
       renderFleet(state);
+      renderTasks(state);
+      updateCollisionAlarm(state);
       render();
     });
     addTaskTopic = new ROSLIB.Topic({ ros, name: '/fleet/add_task', messageType: 'std_msgs/String' });

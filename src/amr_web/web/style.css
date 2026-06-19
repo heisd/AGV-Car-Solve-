@@ -71,6 +71,17 @@ main {
 #map { background: #0b0f14; border-radius: 8px; width: 600px; height: 600px; display: block; }
 #map.aiming { cursor: crosshair; box-shadow: 0 0 0 2px var(--accent) inset; }
 
+.collision-badge {
+  font-size: 12px; font-weight: 700; color: #fff; background: var(--red);
+  padding: 2px 8px; border-radius: 10px; margin-left: 8px;
+}
+.collision-alarm {
+  margin: 8px 0; padding: 8px 12px; border-radius: 6px; font-size: 13px; font-weight: 600;
+  background: rgba(255,59,59,.15); color: #ff6b6b; border: 1px solid rgba(255,59,59,.5);
+  animation: blink 1s ease-in-out infinite;
+}
+@keyframes blink { 50% { opacity: .55; } }
+
 .manual-hint {
   margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 12px;
   background: var(--panel-2); color: var(--muted); border: 1px solid var(--line);
@@ -115,6 +126,10 @@ td.muted, .muted { color: var(--muted); }
 
 .badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
 .badge.IDLE { background: rgba(126,138,153,.2); color: var(--muted); }
+.badge.queued { background: rgba(61,169,252,.12); color: var(--accent); }
+.badge.yield { background: rgba(255,167,51,.18); color: var(--orange); margin-left: 4px; }
+.badge.navdown { background: rgba(255,93,93,.18); color: var(--red); margin-left: 4px; }
+.ok-text { color: var(--green); }
 .badge.TO_PICKUP, .badge.TO_DROPOFF { background: rgba(61,169,252,.18); color: var(--accent); }
 .badge.LOADING, .badge.UNLOADING { background: rgba(255,167,51,.18); color: var(--orange); }
 .badge.TO_CHARGER, .badge.CHARGING { background: rgba(61,220,132,.16); color: var(--green); }

@@ -20,8 +20,9 @@ from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription, LogInfo,
-                            OpaqueFunction, TimerAction)
+                            OpaqueFunction, RegisterEventHandler, TimerAction)
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -74,6 +75,16 @@ def launch_setup(context, *args, **kwargs):
         with open(urdf_file, 'w') as fh:
             fh.write(urdf_xml)
 
+        # spawn 节点（命名变量，供事件驱动用）。负载高/世界大时 gazebo 的 /spawn_entity
+        # 服务可能数十秒才就绪，故 -timeout 120 让其耐心等待，不会过早超时退出。
+        spawn_node = Node(
+            package='gazebo_ros', executable='spawn_entity.py', name=f'spawn_{ns}',
+            arguments=['-entity', ns, '-file', urdf_file,
+                       '-x', str(x), '-y', str(y), '-z', '0.1',
+                       '-timeout', '120.0'],
+            output='screen',
+        )
+
         nodes += [
             Node(
                 package='robot_state_publisher', executable='robot_state_publisher',
@@ -82,14 +93,8 @@ def launch_setup(context, *args, **kwargs):
                 remappings=[('/tf', 'tf'), ('/tf_static', 'tf_static')],
                 output='screen',
             ),
-            TimerAction(period=4.0 + 2.0 * i, actions=[
-                Node(
-                    package='gazebo_ros', executable='spawn_entity.py', name=f'spawn_{ns}',
-                    arguments=['-entity', ns, '-file', urdf_file,
-                               '-x', str(x), '-y', str(y), '-z', '0.1'],
-                    output='screen',
-                ),
-            ]),
+            # 错峰 spawn（8/11/14s 等 gazebo 起来）
+            TimerAction(period=8.0 + 3.0 * i, actions=[spawn_node]),
             Node(
                 package='amr_description', executable='odom_sim_filter', name='odom_sim_filter',
                 namespace=ns, parameters=[{'use_sim_time': True, 'robot_namespace': ns}],
@@ -151,8 +156,18 @@ def launch_setup(context, *args, **kwargs):
                 output='screen', emulate_tty=True,
             ),
         ]
-        # Nav2 按车错峰启动（WSL2 上同时拉 3 套会 DDS 抢服务）
-        nodes.append(TimerAction(period=12.0 + i * 12.0, actions=nav2_actions))
+        # 事件驱动：等本车 spawn 进程退出(成功生成)后再启动其 Nav2。
+        # 这样 Nav2(AMCL/costmap) 一定在机器人存在、能出 scan 之后才激活，
+        # 避免「Nav2 早于 spawn 启动 → 激活失败 → 小车不动」（尤其后启动的 agv2/agv3）。
+        # on_exit 内按车号大幅错峰(2/17/32s)：3 套 Nav2 容器若同时加载组合节点，
+        # load_node 服务会超时(实测 agv3 的 bt_navigator 因此加载失败→导航未就绪)，
+        # 故每套 Nav2 间隔 ~15s 顺序加载。
+        nodes.append(RegisterEventHandler(
+            OnProcessExit(
+                target_action=spawn_node,
+                on_exit=[TimerAction(period=2.0 + 15.0 * i, actions=nav2_actions)],
+            )
+        ))
 
     # 调度中心
     nodes.append(Node(
