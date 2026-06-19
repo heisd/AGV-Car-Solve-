@@ -6,7 +6,7 @@ import time
 import json
 import rclpy
 from rclpy.node import Node
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool, Float32, String
 from sensor_msgs.msg import BatteryState
@@ -33,6 +33,7 @@ class AGVState:
         self.carrying = False
         self.nav_ready = False  # 该车 Nav2(导航栈) 是否已激活就绪
         self.stuck = False      # 朝目标长时间无进展（卡死/被堵）
+        self.plan_poses = []    # 规划路径
 
 class FleetManager(Node):
     """
@@ -123,6 +124,7 @@ class FleetManager(Node):
             self.create_subscription(Odometry, f'/{ns}/ground_truth', lambda msg, ns=ns: self.cb_odom(ns, msg), 10)
             self.create_subscription(Bool, f'/{ns}/on_charger', lambda msg, ns=ns: self.cb_on_charger(ns, msg), 10)
             self.create_subscription(Bool, f'/{ns}/nav_ready', lambda msg, ns=ns: self.cb_nav_ready(ns, msg), 10)
+            self.create_subscription(Path, f'/{ns}/plan', lambda msg, ns=ns: self.cb_plan(ns, msg), 10)
             # Battery
             if self.batt_topic_type in ('auto','battery_state'):
                 self.create_subscription(BatteryState, f'/{ns}/battery_state', lambda msg, ns=ns: self.cb_batt_state(ns, msg), 10)
@@ -206,6 +208,9 @@ class FleetManager(Node):
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self.agv[ns].yaw = math.atan2(siny_cosp, cosy_cosp)
+
+    def cb_plan(self, ns, msg: Path):
+        self.agv[ns].plan_poses = [(p.pose.position.x, p.pose.position.y) for p in msg.poses]
 
     def cb_on_charger(self, ns, msg: Bool):
         self.agv[ns].on_charger = bool(msg.data)
@@ -292,6 +297,17 @@ class FleetManager(Node):
                 segs.append(name)
         return segs
 
+    def detect_segments_from_plan(self, plan_poses):
+        """返回规划路径 plan_poses 穿过的所有走廊段名列表。"""
+        if not plan_poses:
+            return []
+        segs = set()
+        for p in plan_poses[::5]:
+            for name, rect in self.CORRIDOR_SEGMENTS.items():
+                if rect['x_min'] <= p[0] <= rect['x_max'] and rect['y_min'] <= p[1] <= rect['y_max']:
+                    segs.add(name)
+        return list(segs)
+
     def heading_direction(self, agv, segment_name):
         """判断 AGV 在走廊段内的行进方向：'positive'/'negative'/'unknown'。
         东/西走廊取 y 分量，南/北走廊取 x 分量，中心南北走廊取 y 分量。"""
@@ -344,6 +360,8 @@ class FleetManager(Node):
             for q in self._segment_queue.values():
                 if ns in q:
                     q.remove(ns)
+            if hasattr(self.agv[ns], 'plan_poses'):
+                self.agv[ns].plan_poses = []
         # 同时清除让行等待点
         self._wait_target.pop(ns, None)
 
@@ -362,7 +380,8 @@ class FleetManager(Node):
                     self.reissue_goal(promoted_ns)
 
     def nearest_wait_point(self, ns, segment_name):
-        """为 ns 在指定走廊段找到最近的等待点，让车停在段入口外等候。"""
+        """为 ns 在指定走廊段找到最近的等待点，让车停在段入口外等候。
+        会避开需要跨越当前占用车辆的阻挡等待点。"""
         agv = self.agv[ns]
         if agv.pose is None:
             return None
@@ -373,9 +392,38 @@ class FleetManager(Node):
         if not candidates:
             # fallback：所有等待点中找最近的
             candidates = list(self.WAIT_POINTS.items())
+
+        owner = self._segment_owner.get(segment_name)
+        owner_pose = self.agv[owner].pose if (owner and owner != ns) else None
+
+        valid_candidates = []
+        if owner_pose:
+            is_ns = segment_name in ('corridor_east', 'corridor_west', 'corridor_center_ns')
+            for wp_name, wp_xy in candidates:
+                if is_ns:
+                    # 南北走廊：owner_pose 的 y 坐标介于机器人和等待点之间则说明被阻挡
+                    y_robot = agv.pose[1]
+                    y_owner = owner_pose[1]
+                    y_wp = wp_xy[1]
+                    if (y_robot < y_owner < y_wp) or (y_wp < y_owner < y_robot):
+                        continue
+                else:
+                    # 东西走廊：owner_pose 的 x 坐标介于机器人和等待点之间则说明被阻挡
+                    x_robot = agv.pose[0]
+                    x_owner = owner_pose[0]
+                    x_wp = wp_xy[0]
+                    if (x_robot < x_owner < x_wp) or (x_wp < x_owner < x_robot):
+                        continue
+                valid_candidates.append((wp_name, wp_xy))
+        else:
+            valid_candidates = candidates
+
+        if not valid_candidates:
+            valid_candidates = candidates
+
         best_wp = None
         best_d = float('inf')
-        for wp_name, wp_xy in candidates:
+        for wp_name, wp_xy in valid_candidates:
             d = dist(agv.pose, wp_xy)
             if d < best_d:
                 best_d = d
@@ -403,7 +451,8 @@ class FleetManager(Node):
                 self.release_segments(ns)
                 continue
 
-            current_segs = self.detect_segments(agv.pose)
+            plan_segs = self.detect_segments_from_plan(getattr(agv, 'plan_poses', []))
+            current_segs = list(set(self.detect_segments(agv.pose) + plan_segs))
 
             # 释放已驶离的段
             owned_segs = [seg for seg, owner in list(self._segment_owner.items()) if owner == ns]

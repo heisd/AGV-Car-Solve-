@@ -19,5 +19,5 @@ zones:
   charger_1:  {cx: -5.5, cy: -5.5, sx: 2.0, sy: 2.0, yaw: 0.0, gx: -5.5, gy: -4.8}
 
 tasks:
-  - {id: T1, pickup: pickup_A, dropoff: dropoff_A, load_time: 3.0, unload_time: 3.0, priority: 1}
-  - {id: T2, pickup: pickup_B, dropoff: dropoff_B, load_time: 3.0, unload_time: 3.0, priority: 1}
+  - {id: T1, pickup: pickup_A, dropoff: pickup_B, load_time: 5.0, unload_time: 5.0, priority: 1}
+  - {id: T2, pickup: pickup_B, dropoff: pickup_A, load_time: 5.0, unload_time: 5.0, priority: 1}
