@@ -44,6 +44,19 @@
 
     <section class="side">
       <div class="panel">
+        <div class="panel-title">相机视频流 <small>(YOLO 感知 · web_video_server)</small>
+          <span class="cam-ctrl">
+            <label>端口</label><input id="camPort" type="text" spellcheck="false" value="8082" />
+            <label>画质</label><input id="camQuality" type="text" spellcheck="false" value="60" />
+            <button id="camReload">重载</button>
+          </span>
+        </div>
+        <div id="cameraGrid" class="cam-grid">
+          <div class="muted cam-empty">等待车队相机…(需 web_video_server 在线)</div>
+        </div>
+      </div>
+
+      <div class="panel">
         <div class="panel-title">系统异常 <small id="anomalyCount" class="ok-text">· 正常</small></div>
         <ul id="anomalyList" class="anomaly-list">
           <li class="muted">系统正常，无异常…</li>

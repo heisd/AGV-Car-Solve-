@@ -167,3 +167,36 @@ td.muted, .muted { color: var(--muted); }
 .log-list li.WARN  .lv { color: var(--orange); }
 .log-list li.ERROR .lv, .log-list li.FATAL .lv { color: var(--red); }
 .log-list li.ERROR, .log-list li.FATAL { background: rgba(255,93,93,.07); }
+
+/* ---- 相机视频流 (web_video_server MJPEG) ---- */
+.cam-ctrl { float: right; font-weight: 400; font-size: 12px; color: var(--muted); }
+.cam-ctrl label { margin: 0 3px 0 8px; }
+.cam-ctrl input {
+  width: 46px; padding: 2px 5px; font-size: 11px; border-radius: 5px;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+}
+.cam-ctrl button { padding: 2px 8px; font-size: 11px; }
+.cam-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px;
+}
+.cam-empty { padding: 16px 4px; }
+.cam-tile {
+  position: relative; background: #0b0f14; border: 1px solid var(--line);
+  border-radius: 8px; overflow: hidden; aspect-ratio: 4 / 3;
+}
+.cam-img { width: 100%; height: 100%; object-fit: cover; display: block; background: #0b0f14; }
+.cam-label {
+  position: absolute; left: 0; bottom: 0; right: 0;
+  padding: 4px 8px; font-size: 12px; font-weight: 600;
+  background: linear-gradient(transparent, rgba(0,0,0,.7));
+  display: flex; align-items: center; gap: 6px;
+}
+.cam-sem { margin-left: auto; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 700; }
+.cam-sem.sem-clear  { background: rgba(61,220,132,.18); color: var(--green); }
+.cam-sem.sem-pallet { background: rgba(255,167,51,.20); color: var(--orange); }
+.cam-sem.sem-person { background: rgba(255,93,93,.22); color: var(--red); }
+.cam-err {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  text-align: center; padding: 10px; font-size: 12px; color: var(--muted);
+  background: var(--panel-2);
+}

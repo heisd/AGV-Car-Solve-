@@ -124,12 +124,17 @@ const ctx = canvas.getContext('2d');
 const SIZE = canvas.width;
 const PAD = 24;
 const SPAN = SIZE - 2 * PAD;
-const toX = (wx) => PAD + ((wx + VIEW) / (2 * VIEW)) * SPAN;
-const toY = (wy) => PAD + ((VIEW - wy) / (2 * VIEW)) * SPAN;
-const toL = (m) => (m / (2 * VIEW)) * SPAN;
-// 像素 -> 世界（toX/toY 的逆，供地图点击用）
-const fromX = (px) => ((px - PAD) / SPAN) * (2 * VIEW) - VIEW;
-const fromY = (py) => VIEW - ((py - PAD) / SPAN) * (2 * VIEW);
+// 缩放/平移状态：base* 为 VIEW 基础变换，to* 再叠加滚轮缩放 zoom 与拖动平移 pan
+let zoom = 1, panX = 0, panY = 0;
+const baseX = (wx) => PAD + ((wx + VIEW) / (2 * VIEW)) * SPAN;
+const baseY = (wy) => PAD + ((VIEW - wy) / (2 * VIEW)) * SPAN;
+const baseL = (m) => (m / (2 * VIEW)) * SPAN;
+const toX = (wx) => baseX(wx) * zoom + panX;
+const toY = (wy) => baseY(wy) * zoom + panY;
+const toL = (m) => baseL(m) * zoom;
+// 像素 -> 世界（toX/toY 的逆，供地图点击用，需先去除 zoom/pan）
+const fromX = (px) => ((((px - panX) / zoom) - PAD) / SPAN) * (2 * VIEW) - VIEW;
+const fromY = (py) => VIEW - (((((py - panY) / zoom) - PAD) / SPAN) * (2 * VIEW));
 
 function fillRectC(cx, cy, w, h, color) {
   ctx.fillStyle = color;
@@ -149,6 +154,7 @@ let latestState = null;
 // ---- 真实占据栅格地图 (/<ns>/map, nav_msgs/OccupancyGrid) ----
 let mapBitmap = null;       // 离屏 canvas：渲染好的占据栅格（地图静态，只建一次）
 let mapMeta = null;         // {resolution, width, height, originX, originY}
+let mapViewLocked = false;  // 真实 /map 已定标 VIEW 后置 true，避免 world_name 切换覆盖缩放
 let showRealMap = true;     // true=显示真实 /map 栅格，false=硬编码示意图
 let mapSub = null;          // 当前 /map 的 ROSLIB.Topic
 let mapSubNs = null;        // 已订阅 map 的命名空间
@@ -202,6 +208,12 @@ function onMapMsg(msg) {
     originX: info.origin.position.x,
     originY: info.origin.position.y,
   };
+  // 自动适配视野到真实地图范围：地图以世界原点为中心，取较大半边长 + 4% 余量。
+  // 这样占据栅格、/fleet/state 分区、AGV 位置在任意尺寸地图（±7 仓库 / ±25 大仓）上都对齐显示。
+  const halfX = Math.max(Math.abs(mapMeta.originX), Math.abs(mapMeta.originX + w * info.resolution));
+  const halfY = Math.max(Math.abs(mapMeta.originY), Math.abs(mapMeta.originY + h * info.resolution));
+  VIEW = Math.max(halfX, halfY, 1) * 1.04;
+  mapViewLocked = true;
   // 收到地图：停止重订阅、清除不可用标记
   if (mapRetryTimer) { clearInterval(mapRetryTimer); mapRetryTimer = null; }
   mapUnavailable = false;
@@ -232,63 +244,78 @@ function drawStatic(zones) {
   if (useMap) {
     drawMap();
   } else {
-    // 地面
-    fillRectC(0, 0, 2 * WAREHOUSE.half, 2 * WAREHOUSE.half, '#11161d');
-    // 外墙
-    strokeRectC(0, 0, 2 * WAREHOUSE.half, 2 * WAREHOUSE.half, '#46566b');
+    // 仅在已知有硬编码物理布局的场景下才画地表、外墙与货架，避免在大仓等自定义地图场景中因尺度与回退布局不一致产生视觉错位。
+    const isHardcodedWorld = ['warehouse', 'complex_warehouse', 'warehouse_complex'].includes(currentWorldName);
+    if (isHardcodedWorld) {
+      // 地面
+      fillRectC(0, 0, 2 * WAREHOUSE.half, 2 * WAREHOUSE.half, '#11161d');
+      // 外墙
+      strokeRectC(0, 0, 2 * WAREHOUSE.half, 2 * WAREHOUSE.half, '#46566b');
 
-    // 货架
-    if (WAREHOUSE.shelves) {
-      for (const s of WAREHOUSE.shelves) {
-        fillRectC(s.cx, s.cy, s.sx, s.sy, '#8a6d3b');
-      }
-    } else if (WAREHOUSE.shelfYs && WAREHOUSE.shelfXs) {
-      for (const y of WAREHOUSE.shelfYs) {
-        for (const x of WAREHOUSE.shelfXs) {
-          fillRectC(x, y - WAREHOUSE.shelfSize.y / 2, WAREHOUSE.shelfSize.x, WAREHOUSE.shelfSize.y, '#8a6d3b');
+      // 货架
+      if (WAREHOUSE.shelves) {
+        for (const s of WAREHOUSE.shelves) {
+          fillRectC(s.cx, s.cy, s.sx, s.sy, '#8a6d3b');
+        }
+      } else if (WAREHOUSE.shelfYs && WAREHOUSE.shelfXs) {
+        for (const y of WAREHOUSE.shelfYs) {
+          for (const x of WAREHOUSE.shelfXs) {
+            fillRectC(x, y - WAREHOUSE.shelfSize.y / 2, WAREHOUSE.shelfSize.x, WAREHOUSE.shelfSize.y, '#8a6d3b');
+          }
         }
       }
-    }
 
-    // 隔断墙
-    if (WAREHOUSE.partitions) {
-      for (const p of WAREHOUSE.partitions) {
-        fillRectC(p.cx, p.cy, p.sx, p.sy, p.color || '#46566b');
+      // 隔断墙
+      if (WAREHOUSE.partitions) {
+        for (const p of WAREHOUSE.partitions) {
+          fillRectC(p.cx, p.cy, p.sx, p.sy, p.color || '#46566b');
+        }
       }
-    }
 
-    // 辅助装饰物/柜子
-    if (WAREHOUSE.decorations) {
-      for (const d of WAREHOUSE.decorations) {
-        fillRectC(d.cx, d.cy, d.sx, d.sy, d.color);
-        strokeRectC(d.cx, d.cy, d.sx, d.sy, 'rgba(255,255,255,0.15)');
+      // 辅助装饰物/柜子
+      if (WAREHOUSE.decorations) {
+        for (const d of WAREHOUSE.decorations) {
+          fillRectC(d.cx, d.cy, d.sx, d.sy, d.color);
+          strokeRectC(d.cx, d.cy, d.sx, d.sy, 'rgba(255,255,255,0.15)');
+        }
       }
+    } else {
+      // 对于无硬编码布局的世界（例如大仓场景），不画示意图的地面/外墙/货架，直接填充深色背景底图以供标定层显示
+      ctx.fillStyle = '#11161d';
+      ctx.fillRect(0, 0, SIZE, SIZE);
     }
   }
 
-  // 取货点 / 充电站（实体托盘/充电柜的位置示意，仅限原版 warehouse）
-  if (WAREHOUSE.pickup) {
+  // 取货点 / 充电站：仅在无 /fleet/state 分区数据时，回退到布局内置示意（旧版 ±7 仓库）。
+  // 有真实分区时跳过，改由下方按类型着色绘制（针对不同世界自动呈现正确的取货/卸货/充电点）。
+  if (!zones && WAREHOUSE.pickup) {
     const p = WAREHOUSE.pickup;
     fillRectC(p.cx, p.cy, p.sx, p.sy, 'rgba(61,220,132,.18)');
     strokeRectC(p.cx, p.cy, p.sx, p.sy, '#3ddc84');
   }
-  if (WAREHOUSE.charger) {
+  if (!zones && WAREHOUSE.charger) {
     const c = WAREHOUSE.charger;
     fillRectC(c.cx, c.cy, c.sx, c.sy, 'rgba(255,167,51,.18)');
     strokeRectC(c.cx, c.cy, c.sx, c.sy, '#ffa733');
   }
 
-  // 调度区域 (来自 /fleet/state)：语义中心 + 可达接近点(gx,gy)
+  // 调度区域 (来自 /fleet/state)：按类型着色 + 语义中心 + 可达接近点(gx,gy)
+  // 取货=绿 / 卸货=蓝 / 充电=橙 / 其他=灰；被某台车预约时用车色高亮描边。
   if (zones) {
     ctx.font = '11px sans-serif';
     const owners = (latestState && latestState.zone_owner) || {};
     for (const [name, z] of Object.entries(zones)) {
-      const isCharger = name.startsWith('charger');
-      // 被某台车预约（防撞独占）时，用该车颜色高亮描边
+      const type = name.startsWith('charger') ? 'charger'
+        : name.startsWith('pickup') ? 'pickup'
+        : name.startsWith('dropoff') ? 'dropoff' : 'other';
+      const typeColor = type === 'charger' ? '#ffa733'
+        : type === 'pickup' ? '#3ddc84'
+        : type === 'dropoff' ? '#3da9fc' : '#7e93b0';
       const owner = owners[name];
       const ownerColor = owner ? AGV_COLORS[(nsIndex[owner] || 0) % AGV_COLORS.length] : null;
-      strokeRectC(z.cx, z.cy, z.sx, z.sy, ownerColor || (isCharger ? '#ffa733' : '#7e93b0'), [4, 3]);
-      ctx.fillStyle = ownerColor || '#9fb0c4';
+      fillRectC(z.cx, z.cy, z.sx, z.sy, hexToRgba(typeColor, 0.14));
+      strokeRectC(z.cx, z.cy, z.sx, z.sy, ownerColor || typeColor, owner ? [] : [4, 3]);
+      ctx.fillStyle = ownerColor || typeColor;
       ctx.fillText(name + (owner ? ` ⇠${owner}` : ''), toX(z.cx - z.sx / 2) + 2, toY(z.cy + z.sy / 2) - 3);
 
       // 接近点：仅当与中心不同（即中心落在障碍内、AGV 实际停靠点在旁边）
@@ -437,8 +464,23 @@ function drawCollisions() {
 }
 
 // ---- 走廊段与路权绘制 ----
+// 内置走廊/等待点是为 ±7 旧仓库设计的；当 /fleet/state 分区尺度远超此范围
+// （如 amr_vision ±25 大仓），说明与当前地图不匹配，隐藏以免误导。
+// 后续若需按地图显示走廊，应由后端发布与该地图匹配的走廊几何。
+function hardcodedOverlaysMatchMap() {
+  if (!lastZones) return true;
+  let maxAbs = 0;
+  for (const z of Object.values(lastZones)) {
+    maxAbs = Math.max(maxAbs, Math.abs(z.cx) + (z.sx || 0) / 2, Math.abs(z.cy) + (z.sy || 0) / 2);
+  }
+  return maxAbs <= 10;   // 分区≲±7 的世界判定匹配；分区达 ±20 则不匹配
+}
+
 function drawCorridors() {
   if (!latestState) return;
+  // 优先用后端发布的走廊几何（按地图自带划分）；无则回退硬编码（尺度不符时隐藏）
+  const segs = latestState.corridor_segments || (hardcodedOverlaysMatchMap() ? CORRIDOR_SEGMENTS : null);
+  if (!segs) return;
   const owners = latestState.segment_owner || {};
   const queues = latestState.segment_queue || {};
 
@@ -447,7 +489,7 @@ function drawCorridors() {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  for (const [name, seg] of Object.entries(CORRIDOR_SEGMENTS)) {
+  for (const [name, seg] of Object.entries(segs)) {
     const cx = (seg.x_min + seg.x_max) / 2;
     const cy = (seg.y_min + seg.y_max) / 2;
     const w = seg.x_max - seg.x_min;
@@ -501,8 +543,11 @@ function drawCorridors() {
 
 // ---- 等待点绘制 ----
 function drawWaitPoints() {
+  // 优先用后端发布的等待点；无则回退硬编码（尺度不符时隐藏）
+  const wps = (latestState && latestState.wait_points) || (hardcodedOverlaysMatchMap() ? WAIT_POINTS : null);
+  if (!wps) return;
   ctx.save();
-  for (const [name, wp] of Object.entries(WAIT_POINTS)) {
+  for (const [name, wp] of Object.entries(wps)) {
     const px = toX(wp.x);
     const py = toY(wp.y);
     const r = 4;
@@ -632,16 +677,19 @@ function renderRow(state) {
   const owners = state.segment_owner || {};
   const queues = state.segment_queue || {};
 
+  // 走廊几何优先用后端发布的（按地图自带划分），回退硬编码
+  const segs = state.corridor_segments || CORRIDOR_SEGMENTS;
+
   // 显示路权总状态
   let activeLocks = 0;
-  for (const name of Object.keys(CORRIDOR_SEGMENTS)) {
+  for (const name of Object.keys(segs)) {
     if (owners[name]) activeLocks++;
   }
   document.getElementById('rowStatus').textContent = activeLocks > 0
     ? `· 已锁 ${activeLocks} 段`
     : '· 全路段空闲';
 
-  body.innerHTML = Object.entries(CORRIDOR_SEGMENTS).map(([name, seg]) => {
+  body.innerHTML = Object.entries(segs).map(([name, seg]) => {
     const owner = owners[name];
     const queue = queues[name] || [];
 
@@ -792,6 +840,79 @@ function escapeHtml(s) {
 }
 
 // ---------------------------------------------------------------------------
+// 相机视频流 (web_video_server MJPEG) —— 参考 LabRobot/wheeltec_dashboard 接法。
+// 每台车一块 <img>，src 指向 http://<host>:<port>/stream?topic=/<ns>/camera/image_raw。
+// 注意: WSL2 下 MJPEG 长连接偶发卡帧；直连 video_port 一般可用，必要时可改快照轮询。
+// ---------------------------------------------------------------------------
+const camPortEl = document.getElementById('camPort');
+const camQualityEl = document.getElementById('camQuality');
+const camReloadEl = document.getElementById('camReload');
+const cameraGrid = document.getElementById('cameraGrid');
+let camNsKey = '';   // 当前已建 tile 的 ns 集合签名（变化才重建，避免重启流闪断）
+
+function videoBase() {
+  const port = ((camPortEl && camPortEl.value) || '8082').trim();
+  return `${location.protocol}//${location.hostname || 'localhost'}:${port}`;
+}
+
+function camStreamUrl(ns) {
+  const q = Math.max(1, Math.min(100, parseInt(camQualityEl && camQualityEl.value, 10) || 60));
+  // 注意: web_video_server 不会解码 %2F，topic 的斜杠必须保持原样。
+  // 不能用 URLSearchParams（它会把 "/" 编码成 "%2F" -> "Invalid topic name"）。
+  const topic = `/${ns}/camera/image_raw`;
+  return `${videoBase()}/stream?topic=${topic}&type=mjpeg&quality=${q}&_=${Date.now()}`;
+}
+
+function startCamStream(img, ns) {
+  const tile = img.closest('.cam-tile');
+  const err = tile ? tile.querySelector('.cam-err') : null;
+  img.onerror = () => { if (err) err.hidden = false; };
+  img.onload = () => { if (err) err.hidden = true; };
+  img.src = camStreamUrl(ns);
+}
+
+function renderCameras(agvs) {
+  if (!cameraGrid) return;
+  const list = (agvs || []).map((a) => a.ns);
+  const key = list.join(',');
+  if (key !== camNsKey) {       // ns 集合变化 -> 重建 tile（否则只更新徽标）
+    camNsKey = key;
+    if (!list.length) {
+      cameraGrid.innerHTML = '<div class="muted cam-empty">等待车队相机…(需 web_video_server 在线)</div>';
+    } else {
+      cameraGrid.innerHTML = list.map((ns) => {
+        const color = AGV_COLORS[(nsIndex[ns] || 0) % AGV_COLORS.length];
+        return `<div class="cam-tile" data-ns="${ns}">
+          <img class="cam-img" alt="${ns} camera" />
+          <div class="cam-label"><span style="color:${color}">●</span> ${ns}
+            <span class="cam-sem sem-clear" data-ns="${ns}">clear</span></div>
+          <div class="cam-err" hidden>⚠ 无视频流（检查 web_video_server / 相机话题）</div>
+        </div>`;
+      }).join('');
+      cameraGrid.querySelectorAll('.cam-img').forEach((img) => {
+        startCamStream(img, img.closest('.cam-tile').getAttribute('data-ns'));
+      });
+    }
+  }
+  // 每帧更新语义徽标（person/pallet/clear，来自 fleet_manager_ai 的 YOLO 层）
+  (agvs || []).forEach((a) => {
+    const sem = cameraGrid.querySelector(`.cam-sem[data-ns="${a.ns}"]`);
+    if (!sem) return;
+    const label = a.semantic || 'clear';
+    sem.textContent = a.semantic_stop ? `${label}·停车` : label;
+    sem.className = 'cam-sem ' + (label === 'person' ? 'sem-person'
+      : label === 'pallet' ? 'sem-pallet' : 'sem-clear');
+  });
+}
+
+function reloadCameras() {
+  if (!cameraGrid) return;
+  cameraGrid.querySelectorAll('.cam-img').forEach((img) => {
+    startCamStream(img, img.closest('.cam-tile').getAttribute('data-ns'));
+  });
+}
+
+// ---------------------------------------------------------------------------
 // ROS / rosbridge 连接
 // ---------------------------------------------------------------------------
 let ros = null;
@@ -915,15 +1036,27 @@ function connect() {
       latestState = state;
       
       // 动态更新仓库世界底图及坐标范围
-      if (state.world_name && WORLD_LAYOUTS[state.world_name] && currentWorldName !== state.world_name) {
+      if (state.world_name && currentWorldName !== state.world_name) {
         currentWorldName = state.world_name;
-        VIEW = WORLD_LAYOUTS[currentWorldName].view;
+        if (!WORLD_LAYOUTS[currentWorldName]) {
+          // 动态注册未知的场景（例如大仓 my_map 等），定义为空白模板以防止错误引用或错位回退
+          WORLD_LAYOUTS[currentWorldName] = {
+            half: 8.0,
+            view: 8.6,
+            shelves: [],
+            partitions: [],
+            decorations: []
+          };
+        }
         WAREHOUSE = WORLD_LAYOUTS[currentWorldName];
+        // 真实 /map 已定标缩放时不覆盖（避免 world_name 与内置布局尺度冲突，如 amr_vision 的 ±25 大仓）
+        if (!mapViewLocked) VIEW = WORLD_LAYOUTS[currentWorldName].view;
         console.log("检测到地图场景切换: " + currentWorldName + ", VIEW缩放范围: " + VIEW);
       }
       
       ensureRobotTopics(state.agvs);
       if (state.agvs && state.agvs.length) ensureMapSub(state.agvs[0].ns);
+      renderCameras(state.agvs);     // 相机视频流面板（按车队动态建块 + 更新语义徽标）
       // 累积尾迹
       state.agvs.forEach((a) => {
         if (a.x === null || a.y === null) return;
@@ -999,7 +1132,9 @@ function updateManualHint() {
   }
 }
 
+let _dragMoved = false;   // 刚发生过拖动平移时置 true，抑制紧随的 click 误下发目标
 function onMapClick(ev) {
+  if (_dragMoved) { _dragMoved = false; return; }
   if (!selectedNs) return;
   const pub = goalPubByNs[selectedNs];
   if (!pub) return;
@@ -1013,11 +1148,17 @@ function onMapClick(ev) {
   const px = (ev.clientX - rect.left) * (canvas.width / rect.width);
   const py = (ev.clientY - rect.top) * (canvas.height / rect.height);
   const wx = fromX(px), wy = fromY(py);
-  // 限制在仓库内墙范围
-  const lim = WAREHOUSE.half - 0.4;
-  if (Math.abs(wx) > lim || Math.abs(wy) > lim) {
+  // 限制在地图范围内：有真实 /map 时按其边界（x/y 分别，地图可能非方形），否则用内置布局范围
+  let limX, limY;
+  if (mapViewLocked && mapMeta) {
+    limX = Math.max(Math.abs(mapMeta.originX), Math.abs(mapMeta.originX + mapMeta.width * mapMeta.resolution)) - 0.4;
+    limY = Math.max(Math.abs(mapMeta.originY), Math.abs(mapMeta.originY + mapMeta.height * mapMeta.resolution)) - 0.4;
+  } else {
+    limX = limY = WAREHOUSE.half - 0.4;
+  }
+  if (Math.abs(wx) > limX || Math.abs(wy) > limY) {
     manualHint.className = 'manual-hint err';
-    manualHint.textContent = '目标超出仓库范围，已忽略。';
+    manualHint.textContent = '目标超出地图范围，已忽略。';
     return;
   }
   pub.publish(new ROSLIB.Message({
@@ -1037,6 +1178,42 @@ document.getElementById('showRealMap').addEventListener('change', (e) => {
 });
 document.getElementById('clearLog').addEventListener('click', () => { logs.length = 0; renderLogs(); });
 canvas.addEventListener('click', onMapClick);
+if (camReloadEl) camReloadEl.addEventListener('click', reloadCameras);
+
+// ---- 地图鼠标缩放(滚轮，围绕光标) + 平移(放大后拖动) ----
+(function setupZoomPan() {
+  let dragging = false, downX = 0, downY = 0, startPanX = 0, startPanY = 0, moved = false;
+  const sc = () => canvas.width / canvas.getBoundingClientRect().width;
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+    const nz = Math.min(8, Math.max(1, zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+    if (nz === zoom) return;
+    panX = mx - ((mx - panX) / zoom) * nz;   // 保持光标处世界点不动
+    panY = my - ((my - panY) / zoom) * nz;
+    zoom = nz;
+    if (zoom <= 1.0001) { zoom = 1; panX = 0; panY = 0; }   // 复位避免漂移
+    render();
+  }, { passive: false });
+  canvas.addEventListener('mousedown', (e) => {
+    if (zoom <= 1) return;                   // 未放大时不平移，保留点击下发目标
+    dragging = true; moved = false;
+    downX = e.clientX; downY = e.clientY; startPanX = panX; startPanY = panY;
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const k = sc(), dx = e.clientX - downX, dy = e.clientY - downY;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    panX = startPanX + dx * k; panY = startPanY + dy * k;
+    render();
+  });
+  window.addEventListener('mouseup', () => {
+    if (dragging && moved) _dragMoved = true;   // 抑制紧随的 click
+    dragging = false;
+  });
+})();
 
 updateManualHint();
 updateMapStatus();  // 初始化地图状态提示

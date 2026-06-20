@@ -31,12 +31,13 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
     LogInfo,
     OpaqueFunction,
     TimerAction,
 )
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.launch_description_sources import AnyLaunchDescriptionSource, PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -86,6 +87,70 @@ def launch_setup(context, *args, **kwargs):
 
     mode = 'standalone' if launch_gazebo else 'fleet-only'
     nodes.append(LogInfo(msg=f'[amr_vision_fleet] Mode: {mode}, robots: {robot_namespaces}'))
+
+    # -----------------------------------------------------------------------
+    # Web operator panel layer (rosbridge WebSocket + static HTTP server +
+    # web_video_server for camera MJPEG streams).
+    # Brought up in-process with the fleet so a single `ros2 launch` gives you
+    # both the AI fleet and the browser dashboard. Disable with launch_web:=false
+    # (e.g. when web_panel.launch.py is already running separately).
+    #
+    # fleet_manager_ai publishes /fleet/state and consumes /fleet/add_task, so
+    # the full dashboard (fleet table / tasks / right-of-way / collisions) works.
+    # The per-robot camera tiles pull MJPEG from web_video_server (see below).
+    # -----------------------------------------------------------------------
+    launch_web = context.launch_configurations.get('launch_web', 'true').lower() == 'true'
+    if launch_web:
+        rosbridge_port = context.launch_configurations.get('rosbridge_port', '9090')
+        web_port = context.launch_configurations.get('web_port', '8080')
+        web_address = context.launch_configurations.get('web_address', '0.0.0.0')
+        video_port = context.launch_configurations.get('video_port', '8082')
+
+        web_dir = os.path.join(get_package_share_directory('amr_web'), 'web')
+        rosbridge_launch = os.path.join(
+            get_package_share_directory('rosbridge_server'),
+            'launch', 'rosbridge_websocket_launch.xml',
+        )
+
+        nodes.append(IncludeLaunchDescription(
+            AnyLaunchDescriptionSource(rosbridge_launch),
+            launch_arguments={'port': rosbridge_port}.items(),
+        ))
+        nodes.append(ExecuteProcess(
+            cmd=['python3', '-m', 'http.server', web_port,
+                 '--bind', web_address, '--directory', web_dir],
+            output='screen',
+        ))
+        # web_video_server: exposes every image topic as HTTP MJPEG/snapshot at
+        # http://<host>:<video_port>/stream?topic=/<ns>/camera/image_raw&type=mjpeg
+        # (the amr_web camera tiles point their <img> at this). respawn=True: it
+        # occasionally dies on a startup port race; just bring it back.
+        # Guarded: if the package is missing, skip it (camera tiles show "no
+        # stream") instead of aborting the whole launch.
+        try:
+            get_package_share_directory('web_video_server')
+            _have_wvs = True
+        except Exception:  # PackageNotFoundError
+            _have_wvs = False
+        if _have_wvs:
+            nodes.append(Node(
+                package='web_video_server',
+                executable='web_video_server',
+                name='web_video_server',
+                parameters=[{'port': int(video_port), 'address': web_address}],
+                respawn=True,
+                respawn_delay=2.0,
+                output='screen',
+            ))
+        else:
+            nodes.append(LogInfo(msg=(
+                '[amr_vision_fleet] web_video_server not installed — camera streams '
+                'disabled. Install: sudo apt install ros-humble-web-video-server')))
+        nodes.append(LogInfo(msg=[
+            '[amr_vision_fleet] Web panel: http://localhost:', web_port,
+            '/   (rosbridge ws://localhost:', rosbridge_port,
+            ', video http://localhost:', video_port, ')',
+        ]))
 
     # -----------------------------------------------------------------------
     # Standalone mode: start Gazebo + all per-robot setup nodes
@@ -366,6 +431,34 @@ def generate_launch_description():
                 'Passed to each camera_detection_node instance. '
                 'Default uses the YOLOv8 nano model downloaded on first run.'
             ),
+        ),
+        DeclareLaunchArgument(
+            'launch_web',
+            default_value='true',
+            description=(
+                'Bring up the web operator panel (rosbridge + static HTTP server) '
+                'alongside the fleet. Set false if web_panel.launch.py is already running.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            'rosbridge_port',
+            default_value='9090',
+            description='rosbridge WebSocket port for the web panel.',
+        ),
+        DeclareLaunchArgument(
+            'web_port',
+            default_value='8080',
+            description='Static HTTP server port serving the web panel.',
+        ),
+        DeclareLaunchArgument(
+            'web_address',
+            default_value='0.0.0.0',
+            description='HTTP server bind address (0.0.0.0 = reachable from LAN).',
+        ),
+        DeclareLaunchArgument(
+            'video_port',
+            default_value='8082',
+            description='web_video_server MJPEG port for camera streams in the panel.',
         ),
         OpaqueFunction(function=launch_setup),
     ])
