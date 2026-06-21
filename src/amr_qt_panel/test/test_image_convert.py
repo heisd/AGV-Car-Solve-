@@ -31,3 +31,11 @@ def test_unsupported():
     arr = np.zeros((2, 2, 4), np.uint8)
     with pytest.raises(ValueError):
         image_to_qimage(_msg(arr, 'rgba8'))
+
+
+def test_invalid_step():
+    arr = np.zeros((4, 5, 3), np.uint8)
+    msg = _msg(arr, 'rgb8')
+    msg.step = msg.step - 1  # Make step too small
+    with pytest.raises(ValueError):
+        image_to_qimage(msg)
