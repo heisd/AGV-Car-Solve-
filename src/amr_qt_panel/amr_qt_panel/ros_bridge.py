@@ -2,7 +2,6 @@
 import json
 import threading
 
-import rclpy
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import (QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy,
@@ -42,7 +41,6 @@ class RosBridge(QObject):
         self._exec = SingleThreadedExecutor()
         self._exec.add_node(self._node)
         self._thread = threading.Thread(target=self._spin, daemon=True)
-        self._active_cam = None
         self._cam_subs = []          # 当前相机的订阅（切车时销毁）
         self._path_subs = {}         # ns -> sub
         self._map_ns = map_ns
@@ -67,14 +65,13 @@ class RosBridge(QObject):
     def _spin(self):
         try:
             self._exec.spin()
-        except Exception:
-            pass
+        except Exception as e:
+            self._node.get_logger().warn(f"executor spin ended: {e}")
 
     def shutdown(self):
-        try:
-            self._exec.shutdown()
-        finally:
-            self._node.destroy_node()
+        self._exec.shutdown()
+        self._thread.join(timeout=2.0)
+        self._node.destroy_node()
 
     # ---- 订阅管理 ----
     def _set_map_sub(self, ns):
@@ -92,7 +89,6 @@ class RosBridge(QObject):
         for s in self._cam_subs:
             self._node.destroy_subscription(s)
         self._cam_subs = []
-        self._active_cam = ns
         img_topic, det_topic = camera_topics(ns)
         self._cam_subs.append(self._node.create_subscription(
             Image, img_topic,
