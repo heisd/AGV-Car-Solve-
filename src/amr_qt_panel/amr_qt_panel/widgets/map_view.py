@@ -100,9 +100,11 @@ class MapView(QWidget):
             p.drawText(int(x) + 2, int(y) - 3, name)
 
     def _draw_paths(self, p):
-        for i, (ns, pts) in enumerate(self._paths.items()):
+        ns_index = {a.ns: i for i, a in enumerate(self._fs.agvs)} if self._fs else {}
+        for ns, pts in self._paths.items():
             if not pts:
                 continue
+            i = ns_index.get(ns, 0)
             pen = QPen(QColor(AGV_COLORS[i % len(AGV_COLORS)]))
             pen.setWidth(2)
             pen.setStyle(Qt.DashLine)
@@ -129,10 +131,18 @@ class MapView(QWidget):
             p.drawText(int(cx) + 8, int(cy), a.ns)
 
     # ---- 交互 ----
+    def zoom_at(self, px, py, factor):
+        """Zoom by factor while keeping the world point under pixel (px,py) fixed."""
+        wx, wy = self._t.from_px(px, py)
+        self._t.zoom *= factor
+        nx, ny = self._t.to_px(wx, wy)
+        self._t.pan_x += px - nx
+        self._t.pan_y += py - ny
+        self.update()
+
     def wheelEvent(self, ev):
         factor = 1.1 if ev.angleDelta().y() > 0 else 1 / 1.1
-        self._t.zoom *= factor
-        self.update()
+        self.zoom_at(ev.x(), ev.y(), factor)
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:

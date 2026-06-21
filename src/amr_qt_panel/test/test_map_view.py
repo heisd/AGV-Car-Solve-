@@ -35,3 +35,13 @@ def test_click_emits_world(qapp):
     v.map_clicked.connect(lambda x, y: got.append((x, y)))
     v._emit_click_at(300, 300)          # 测试钩子：用画布中心像素
     assert got and len(got[0]) == 2
+
+
+def test_zoom_anchors_to_cursor(qapp):
+    v = MapView()
+    v.resize(600, 600)
+    px, py = 220.0, 160.0
+    before = v._t.from_px(px, py)
+    v.zoom_at(px, py, 1.5)
+    after = v._t.from_px(px, py)
+    assert abs(after[0] - before[0]) < 1e-6 and abs(after[1] - before[1]) < 1e-6
