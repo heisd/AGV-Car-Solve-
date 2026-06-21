@@ -294,12 +294,13 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ### Task 3: `ros_bridge.py` —— ROS 边界（线程/信号/订阅/发布）
 
 **Files:**
+- Create: `src/amr_qt_panel/amr_qt_panel/ros_helpers.py`（纯函数，**无任何 ROS/PyQt 导入**）
 - Create: `src/amr_qt_panel/amr_qt_panel/ros_bridge.py`
-- Test: `src/amr_qt_panel/test/test_ros_helpers.py`（纯 helper 单测）
+- Test: `src/amr_qt_panel/test/test_ros_helpers.py`（纯 helper 单测，**无需 source ROS**）
 
 **Interfaces:**
 - Produces:
-  - 纯 helper：`add_task_payload(pickup, dropoff) -> str`（JSON）、`yaw_to_quat(yaw) -> (x,y,z,w)`、`camera_topics(ns) -> (image_topic, det_topic)`。
+  - 纯 helper（在 `ros_helpers.py`，无 ROS/Qt 导入）：`add_task_payload(pickup, dropoff) -> str`（JSON）、`yaw_to_quat(yaw) -> (x,y,z,w)`、`camera_topics(ns) -> (image_topic, det_topic)`。`ros_bridge.py` 从该模块 import 复用。
   - `RosBridge(QObject)` 信号：`fleet_state_changed(object)`、`image_changed(str, object)`、`detections_changed(str, object)`、`map_changed(str, object)`、`path_changed(str, object)`、`log_received(object)`。
   - 方法：`start()`、`shutdown()`、`set_active_camera(ns)`、`set_map_ns(ns)`、`publish_goal(ns, x, y, yaw=0.0)`、`publish_add_task(pickup, dropoff)`。
 
@@ -308,7 +309,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```python
 import json
 import math
-from amr_qt_panel.ros_bridge import add_task_payload, yaw_to_quat, camera_topics
+from amr_qt_panel.ros_helpers import add_task_payload, yaw_to_quat, camera_topics
 
 
 def test_add_task_payload():
@@ -336,14 +337,33 @@ def test_camera_topics():
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cd src/amr_qt_panel && python -m pytest test/test_ros_helpers.py -v`
-Expected: FAIL（`ModuleNotFoundError: amr_qt_panel.ros_bridge`）。
+Expected: FAIL（`ModuleNotFoundError: amr_qt_panel.ros_helpers`）。
 
-- [ ] **Step 3: 实现 ros_bridge.py**
+- [ ] **Step 3: 实现 ros_helpers.py（纯函数，无 ROS/Qt 导入）**
+
+```python
+"""纯函数 helper：与 ROS/Qt 无关，可独立单测（不需 source ROS）。"""
+import json
+import math
+
+
+def add_task_payload(pickup: str, dropoff: str) -> str:
+    return json.dumps({'pickup': pickup, 'dropoff': dropoff})
+
+
+def yaw_to_quat(yaw: float):
+    return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
+
+
+def camera_topics(ns: str):
+    return (f'/{ns}/camera/image_raw', f'/{ns}/camera/detections')
+```
+
+- [ ] **Step 4: 实现 ros_bridge.py**
 
 ```python
 """RosBridge：唯一 ROS 边界。后台线程跑执行器，回调只 emit Qt 信号。"""
 import json
-import math
 import threading
 
 import rclpy
@@ -361,19 +381,7 @@ from std_msgs.msg import String
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from amr_qt_panel.model.image_convert import image_to_qimage
-
-
-# ----- 纯 helper（可无 ROS 单测）-----
-def add_task_payload(pickup: str, dropoff: str) -> str:
-    return json.dumps({'pickup': pickup, 'dropoff': dropoff})
-
-
-def yaw_to_quat(yaw: float):
-    return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
-
-
-def camera_topics(ns: str):
-    return (f'/{ns}/camera/image_raw', f'/{ns}/camera/detections')
+from amr_qt_panel.ros_helpers import add_task_payload, camera_topics, yaw_to_quat
 
 
 _MAP_QOS = QoSProfile(
@@ -503,12 +511,12 @@ class RosBridge(QObject):
         self._add_task_pub.publish(String(data=add_task_payload(pickup, dropoff)))
 ```
 
-- [ ] **Step 4: 跑 helper 测试确认通过**
+- [ ] **Step 5: 跑 helper 测试确认通过（无需 source ROS）**
 
 Run: `cd src/amr_qt_panel && python -m pytest test/test_ros_helpers.py -v`
-Expected: 4 passed。（注意：本测试只导入纯 helper，导入 `ros_bridge` 需 ROS 环境已 source；若未 source，单独把 helper 拆到 `ros_helpers.py` 亦可。执行时请先 `source install/setup.bash`。）
+Expected: 4 passed。（`ros_helpers.py` 无 ROS/Qt 导入，纯 Python 即可跑。）
 
-- [ ] **Step 5: 集成冒烟（需 source ROS）**
+- [ ] **Step 6: 集成冒烟（需 source ROS）**
 
 Run:
 ```bash
@@ -521,10 +529,10 @@ import time; time.sleep(0.5); b.shutdown(); rclpy.shutdown(); print('OK')
 ```
 Expected: 打印 `OK`，无异常。
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/amr_qt_panel/amr_qt_panel/ros_bridge.py src/amr_qt_panel/test/test_ros_helpers.py
+git add src/amr_qt_panel/amr_qt_panel/ros_helpers.py src/amr_qt_panel/amr_qt_panel/ros_bridge.py src/amr_qt_panel/test/test_ros_helpers.py
 git commit -m "feat(amr_qt_panel): add RosBridge (executor thread + Qt signals)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
@@ -1219,6 +1227,7 @@ Expected: FAIL（`ModuleNotFoundError`）。
 
 ```python
 """MapView：QPainter 重画占用栅格 + 静态图元 + Nav2 路径 + AGV；滚轮缩放、点击导航。"""
+import numpy as np
 from PyQt5.QtCore import Qt, pyqtSignal, QPointF
 from PyQt5.QtGui import QPainter, QColor, QPen, QImage, QPixmap, QPolygonF
 from PyQt5.QtWidgets import QWidget
@@ -1252,18 +1261,14 @@ class MapView(QWidget):
         w, h, res = info.width, info.height, info.resolution
         ox, oy = info.origin.position.x, info.origin.position.y
         self._t.calibrate_from_map(ox, oy, w, h, res)
-        # 占用栅格 -> QImage（左下角=origin，需上下翻转）
-        img = QImage(w, h, QImage.Format_RGB888)
-        for row in range(h):
-            for col in range(w):
-                v = grid.data[row * w + col]
-                if v < 0:
-                    c = 130           # 未知=灰
-                elif v >= 65:
-                    c = 30            # 占据=深
-                else:
-                    c = 235           # 空闲=浅
-                img.setPixel(col, h - 1 - row, (c << 16) | (c << 8) | c)
+        # 占用栅格 -> QImage（numpy 向量化；左下角=origin，需上下翻转）
+        data = np.asarray(grid.data, dtype=np.int16).reshape(h, w)
+        gray = np.full((h, w), 235, dtype=np.uint8)    # 空闲=浅
+        gray[data < 0] = 130                           # 未知=灰
+        gray[data >= 65] = 30                          # 占据=深
+        rgb = np.ascontiguousarray(
+            np.repeat(np.flipud(gray)[:, :, None], 3, axis=2))
+        img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
         self._map_bitmap = img
         self._map_meta = (ox, oy, w, h, res)
         self.update()
