@@ -38,6 +38,9 @@ class RosBridge(QObject):
     def __init__(self, map_ns: str = 'agv1'):
         super().__init__()
         self._node = Node('amr_qt_panel')
+        self._node.declare_parameter('map_ns', map_ns)
+        map_ns = self._node.get_parameter('map_ns').get_parameter_value().string_value
+        self._node.get_logger().info(f"amr_qt_panel map_ns={map_ns}")
         self._exec = SingleThreadedExecutor()
         self._exec.add_node(self._node)
         self._thread = threading.Thread(target=self._spin, daemon=True)
