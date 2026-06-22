@@ -67,6 +67,7 @@ def launch_setup(context, *args, **kwargs):
     tasks_file = os.path.join(pkg_share, 'yaml', 'tasks.yaml')
     nav2_params_template = os.path.join(pkg_share, 'yaml', 'nav2_params_amr.yaml')
     map_file = os.path.join(pkg_share, 'maps', 'my_map.yaml')
+    world_file = os.path.join(pkg_share, 'worlds', 'map.world')
     nav2_bringup_dir = get_package_share_directory('nav2_bringup')
 
     if not os.path.exists(tasks_file):
@@ -75,6 +76,8 @@ def launch_setup(context, *args, **kwargs):
         raise RuntimeError(f'[amr_vision_fleet] nav2_params_amr.yaml not found: {nav2_params_template}')
     if not os.path.exists(map_file):
         raise RuntimeError(f'[amr_vision_fleet] my_map.yaml not found: {map_file}')
+    if not os.path.exists(world_file):
+        raise RuntimeError(f'[amr_vision_fleet] map.world not found: {world_file}')
 
     # Read the nav2 params template once
     with open(nav2_params_template, 'r') as f:
@@ -164,7 +167,7 @@ def launch_setup(context, *args, **kwargs):
 
         nodes.append(IncludeLaunchDescription(
             PythonLaunchDescriptionSource(gazebo_launch),
-            launch_arguments={'world': world_file}.items(),
+            launch_arguments={'world': world_file, 'gui': 'false'}.items(),
         ))
 
         for idx, ns in enumerate(robot_namespaces):
@@ -302,7 +305,7 @@ def launch_setup(context, *args, **kwargs):
             name='tf_relay',
             namespace=ns,
             parameters=[{
-                'use_sim_time': True,
+                'use_sim_time': launch_gazebo,
                 'robot_namespace': ns,
             }],
             output='screen',
@@ -348,7 +351,7 @@ def launch_setup(context, *args, **kwargs):
                     'use_namespace': 'True',
                     'slam': 'False',
                     'map': map_file,
-                    'use_sim_time': 'True',
+                    'use_sim_time': 'True' if launch_gazebo else 'False',
                     'params_file': nav2_params_file,
                     'autostart': 'True',
                     'use_composition': 'False',
@@ -360,7 +363,7 @@ def launch_setup(context, *args, **kwargs):
                 name='nav2_goal_bridge',
                 namespace=ns,
                 parameters=[{
-                    'use_sim_time': True,
+                    'use_sim_time': launch_gazebo,
                     'robot_namespace': ns,
                     'initial_x': init_x,
                     'initial_y': init_y,
@@ -383,7 +386,7 @@ def launch_setup(context, *args, **kwargs):
         executable='fleet_manager_ai', # CHANGE 9
         name='fleet_manager_ai',       # CHANGE 9
         parameters=[{
-            'use_sim_time': True,
+            'use_sim_time': launch_gazebo,
             'robot_namespaces': robot_namespaces,
             'tasks_file': tasks_file,
             'battery_topic_type': 'auto',
@@ -391,6 +394,7 @@ def launch_setup(context, *args, **kwargs):
             'battery_low_threshold': 0.20,
             'battery_resume_threshold': 0.60,
             'goal_reach_dist': 0.25,
+            'world_file': world_file,
         }],
         output='screen',
         emulate_tty=True,

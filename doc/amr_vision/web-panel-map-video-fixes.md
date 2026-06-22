@@ -36,10 +36,11 @@
 
 ---
 
-## 2. 视频流不出图：%2F 编码 Bug
+## 2. 视频流不出图：%2F 编码 Bug 与高频销毁重建 Bug
 
 **症状**：相机面板显示「⚠ 无视频流」，但从 WSL 用 curl 取流正常。
 
+### 2.1 %2F 编码 Bug
 **根因**：`app.js` 用 `URLSearchParams` 拼 URL，会把话题里的 `/` 百分号编码成 `%2F`。该版本 `web_video_server` **不解码** `%2F`，于是报错并拒绝订阅：
 ```
 web_video_server: Invalid topic name: '%2Fagv1%2Fcamera%2Fimage_raw'
@@ -53,6 +54,13 @@ return `${videoBase()}/stream?topic=${topic}&type=mjpeg&quality=${q}&_=${Date.no
 ```
 
 **证据**：编码形式 `%2F` → **0 帧**；字面 `/` → **39 帧 / 4s**（`multipart/x-mixed-replace`）。
+
+### 2.2 高频销毁重建导致流请求被中止（Abort）的 Bug
+**根因**：后端以高频发布车辆遥测状态（`/fleet/state`），但数据帧中的 `state.agvs` 可能会因为网络时延或短暂的状态未就绪在某些帧发生变空等抖动。前端 `renderCameras` 原本使用的是直接重写 `cameraGrid.innerHTML` 的方式来动态重建车辆相机画面。这导致 `state.agvs` 只要发生一帧变化，已建的 `<img>` 标签就会从 DOM 中被彻底移除，从而强制触发浏览器对视频流长连接的 `Abort`（中止），并于下个周期重新建流。这种不到 1 秒的高频断开与重连使浏览器完全来不及解码第一帧，使得画面持续卡在灰色报错状态。
+
+**修复**（`app.js: renderCameras`）：
+- 废除原先暴力的 `innerHTML` 整体重置方案，改为**增量式 DOM 更新（Incremental DOM Update）**。
+- 动态维护现有的 `.cam-tile`。每次仅将新加入的车辆增量插入 DOM 并单独启动其视频流；当车辆下线时才将其移出；若列表短暂变空时保持现状以防闪断。这保证了已连接的视频流长连接不被干扰和销毁。
 
 ---
 
@@ -77,8 +85,9 @@ VIEW = Math.max(halfX, halfY, 1) * 1.04;   // 本图 ≈ 26
 **症状**：如果网页端“真实地图(/map)”未勾选，或者未收到真实地图，渲染会回退到硬编码示意图。但在大仓世界下，地图尺度 `VIEW` 和分区、AGV 的坐标已经自适应为大仓尺度（±25 m），而回退渲染机制会画出默认小仓（±7 m）的地面、外墙和货架，导致大仓的真实分区被画到了“外墙”外面，且正中央出现了一排实际上并不存在的“幽灵货架”。
 
 **修复**：
-- 在 `app.js` 中动态注册未知场景模板，将 `currentWorldName` 设为 `state.world_name`，防止对未知的大仓世界（如 `my_map`）依然引用默认的 `warehouse` 配置；
-- 在 `drawStatic` 中加入场景类型守卫，仅对已定义硬编码布局的已知小仓场景（如 `warehouse`、`complex_warehouse`、`warehouse_complex`）才绘制回退的地面、外墙和货架。对于大仓场景等未硬编码布局的未知场景，关闭真实地图时只填充深色底色，从而保证走廊、分区和 AGV 不会出现错位绘制。
+- **默认地图初始化**：在 `app.js` 中将初始默认的 `currentWorldName` 设为 `'map'`（空模板），防止在页面刚加载、rosbridge 尚未连上或尚未收到首条 `/fleet/state` 遥测消息的“初始空白期”时，因默认引用小仓 `'warehouse'` 导致强行绘制出旧的小仓外墙与货架。
+- **动态注册未知场景**：在接收到车队状态消息时，动态注册未知场景模板，将 `currentWorldName` 设为 `state.world_name`，防止对未知的大仓世界（如 `my_map`）依然引用默认的 `warehouse` 配置；
+- **回退渲染类型守卫**：在 `drawStatic` 中加入场景类型守卫，仅对已定义硬编码布局的已知小仓场景（如 `warehouse`、`complex_warehouse`、`warehouse_complex`）才绘制回退的地面、外墙和货架。对于大仓场景等未硬编码布局的未知场景，在关闭或无真实地图时只填充深色底色，从而保证走廊、分区和 AGV 不会出现错位绘制。
 
 
 ---
@@ -143,8 +152,9 @@ const toX = (wx) => baseX(wx) * zoom + panX;   // baseX/baseY/baseL 为 VIEW 基
 
 | 文件 | 改动 |
 |------|------|
-| `src/amr_web/web/app.js` | camStreamUrl 去 `%2F`；onMapMsg 自适应 VIEW + `mapViewLocked`；world_name 守卫；drawStatic 分区按类型着色、去硬编码取货/充电；drawCorridors/drawWaitPoints/renderRow 读后端几何；toX/toY 缩放变换 + 滚轮/拖动事件；onMapClick 范围修正 + 防拖动；drawStatic 中对非硬编码场景（如大仓）跳过画示意墙/货架以防止关图错位；动态注册未知场景模板 |
+| `src/amr_web/web/app.js` | camStreamUrl 去 `%2F`；onMapMsg 自适应 VIEW + `mapViewLocked`；world_name 守卫；drawStatic 分区按类型着色、去硬编码取货/充电；drawCorridors/drawWaitPoints/renderRow 读后端几何；toX/toY 缩放变换 + 滚轮/拖动事件；onMapClick 范围修正 + 防拖动；drawStatic 中对非硬编码场景（如大仓）跳过画示意墙/货架以防止关图错位；动态注册未知场景模板；currentWorldName 默认初始化设为 `'map'` 规避连接前回退渲染 |
 | `src/amr_vision/amr_vision/fleet_manager_ai.py` | CORRIDOR_SEGMENTS/WAIT_POINTS 改井字主干道；publish_fleet_state 发布 corridor_segments + wait_points |
+| `src/amr_vision/launch/amr_vision_fleet.launch.py` | 将各节点（包括 `fleet_manager_ai` / `tf_relay` / `nav2_goal_bridge` 等）的 `use_sim_time` 绑定到 `launch_gazebo` 变量以消除 `fleet-only` 模式下因缺少 `/clock` 产生的时钟死锁；给 `fleet_manager_ai` 节点补齐传入 `'world_file': world_file` 参数，解决后端因参数缺失导致 `world_name` 始终判定为 `'warehouse'` 引发的前端回退错位 |
 
 > 均为 Python/JS/launch 改动，`--symlink-install` 下：前端浏览器刷新即生效；后端改动需重启 `fleet_manager_ai`（重启仿真）。
 

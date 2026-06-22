@@ -38,7 +38,7 @@ def generate_launch_description():
             'num_agvs', default_value='1',
             description='车队数量（透传给 amr_vision_fleet）。'),
         DeclareLaunchArgument(
-            'launch_gazebo', default_value='false',
+            'launch_gazebo', default_value='true',
             description='true=独立模式自起 Gazebo 并 spawn 机器人；'
                         'false=假设 display_vision/spawn_agv 已在运行（透传）。'),
         DeclareLaunchArgument(

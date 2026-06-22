@@ -12,7 +12,7 @@
 
 // ---- 仓库静态几何 (与 worlds/warehouse.world 一致) ----
 // ---- 仓库静态几何 (与 worlds/*.world 一致，根据运行场景动态加载) ----
-let currentWorldName = 'warehouse';
+let currentWorldName = 'map';
 let VIEW = 7.6;                                // 视野半边长 (m)
 
 const WORLD_LAYOUTS = {
@@ -840,9 +840,11 @@ function escapeHtml(s) {
 }
 
 // ---------------------------------------------------------------------------
-// 相机视频流 (web_video_server MJPEG) —— 参考 LabRobot/wheeltec_dashboard 接法。
-// 每台车一块 <img>，src 指向 http://<host>:<port>/stream?topic=/<ns>/camera/image_raw。
-// 注意: WSL2 下 MJPEG 长连接偶发卡帧；直连 video_port 一般可用，必要时可改快照轮询。
+// 相机视频流 (web_video_server) —— 快照轮询方案（替代 MJPEG 长连接）。
+// 每台车一块 <img>，周期性请求 http://<host>:<port>/snapshot?topic=/<ns>/camera/image_raw。
+// 为何不用 /stream(type=mjpeg)：multipart/x-mixed-replace 是"永不结束"的长连接，
+// 穿过 WSL2 localhost 端口转发 / 系统代理时极易被缓冲截断 -> <img> 拿不到帧而超时。
+// 短小的 /snapshot GET 每帧独立、往返 ~几十 ms，明显更稳；源帧率约 4–5 Hz，轮询足够。
 // ---------------------------------------------------------------------------
 const camPortEl = document.getElementById('camPort');
 const camQualityEl = document.getElementById('camQuality');
@@ -850,50 +852,98 @@ const camReloadEl = document.getElementById('camReload');
 const cameraGrid = document.getElementById('cameraGrid');
 let camNsKey = '';   // 当前已建 tile 的 ns 集合签名（变化才重建，避免重启流闪断）
 
+const CAM_POLL_MS = 200;        // 上一帧加载完成后再隔此间隔取下一帧（目标 ~5 fps，不堆积请求）
+const CAM_ERR_RETRY_MS = 2000;  // 取帧失败后的退避重试
+
 function videoBase() {
   const port = ((camPortEl && camPortEl.value) || '8082').trim();
   return `${location.protocol}//${location.hostname || 'localhost'}:${port}`;
 }
 
-function camStreamUrl(ns) {
+function camSnapshotUrl(ns) {
   const q = Math.max(1, Math.min(100, parseInt(camQualityEl && camQualityEl.value, 10) || 60));
   // 注意: web_video_server 不会解码 %2F，topic 的斜杠必须保持原样。
   // 不能用 URLSearchParams（它会把 "/" 编码成 "%2F" -> "Invalid topic name"）。
   const topic = `/${ns}/camera/image_raw`;
-  return `${videoBase()}/stream?topic=${topic}&type=mjpeg&quality=${q}&_=${Date.now()}`;
+  return `${videoBase()}/snapshot?topic=${topic}&quality=${q}&_=${Date.now()}`;
 }
 
+// 快照轮询循环：先把下一帧加载到临时 Image，成功后再换到可见 <img>，
+// 避免换帧瞬间出现破图/闪烁。循环句柄挂在 img._camStop 上，便于重载/下线时停掉。
 function startCamStream(img, ns) {
   const tile = img.closest('.cam-tile');
   const err = tile ? tile.querySelector('.cam-err') : null;
-  img.onerror = () => { if (err) err.hidden = false; };
-  img.onload = () => { if (err) err.hidden = true; };
-  img.src = camStreamUrl(ns);
+
+  if (img._camStop) img._camStop();   // 同一 <img> 上避免起多个轮询循环（reload 场景）
+  let stopped = false;
+  let timer = null;
+  img._camStop = () => { stopped = true; if (timer) { clearTimeout(timer); timer = null; } };
+
+  const alive = () => !stopped && document.body.contains(img);
+
+  const loadNext = () => {
+    if (!alive()) { img._camStop(); return; }
+    const probe = new Image();
+    probe.onload = () => {
+      if (!alive()) return;
+      img.src = probe.src;            // 同 URL 已在内存缓存，直接换上，不二次拉取
+      if (err) err.hidden = true;
+      timer = setTimeout(loadNext, CAM_POLL_MS);
+    };
+    probe.onerror = () => {
+      if (!alive()) return;
+      if (err) err.hidden = false;
+      timer = setTimeout(loadNext, CAM_ERR_RETRY_MS);
+    };
+    probe.src = camSnapshotUrl(ns);
+  };
+  loadNext();
 }
 
 function renderCameras(agvs) {
   if (!cameraGrid) return;
   const list = (agvs || []).map((a) => a.ns);
-  const key = list.join(',');
-  if (key !== camNsKey) {       // ns 集合变化 -> 重建 tile（否则只更新徽标）
-    camNsKey = key;
-    if (!list.length) {
+  
+  if (!list.length) {
+    if (!cameraGrid.querySelector('.cam-tile') && !cameraGrid.querySelector('.cam-empty')) {
       cameraGrid.innerHTML = '<div class="muted cam-empty">等待车队相机…(需 web_video_server 在线)</div>';
-    } else {
-      cameraGrid.innerHTML = list.map((ns) => {
-        const color = AGV_COLORS[(nsIndex[ns] || 0) % AGV_COLORS.length];
-        return `<div class="cam-tile" data-ns="${ns}">
-          <img class="cam-img" alt="${ns} camera" />
-          <div class="cam-label"><span style="color:${color}">●</span> ${ns}
-            <span class="cam-sem sem-clear" data-ns="${ns}">clear</span></div>
-          <div class="cam-err" hidden>⚠ 无视频流（检查 web_video_server / 相机话题）</div>
-        </div>`;
-      }).join('');
-      cameraGrid.querySelectorAll('.cam-img').forEach((img) => {
-        startCamStream(img, img.closest('.cam-tile').getAttribute('data-ns'));
-      });
     }
+    return;
   }
+
+  const currentTiles = Array.from(cameraGrid.querySelectorAll('.cam-tile'));
+  const currentNses = currentTiles.map((t) => t.getAttribute('data-ns'));
+
+  // 移除下线的相机
+  currentTiles.forEach((tile) => {
+    const ns = tile.getAttribute('data-ns');
+    if (!list.includes(ns)) {
+      tile.remove();
+    }
+  });
+
+  // 添加新上线的相机
+  list.forEach((ns) => {
+    if (!currentNses.includes(ns)) {
+      const color = AGV_COLORS[(nsIndex[ns] || 0) % AGV_COLORS.length];
+      const temp = document.createElement('div');
+      temp.innerHTML = `<div class="cam-tile" data-ns="${ns}">
+        <img class="cam-img" alt="${ns} camera" />
+        <div class="cam-label"><span style="color:${color}">●</span> ${ns}
+          <span class="cam-sem sem-clear" data-ns="${ns}">clear</span></div>
+        <div class="cam-err" hidden>⚠ 无视频流（检查 web_video_server / 相机话题）</div>
+      </div>`;
+      const tile = temp.firstElementChild;
+      
+      const emptyEl = cameraGrid.querySelector('.cam-empty');
+      if (emptyEl) emptyEl.remove();
+
+      cameraGrid.appendChild(tile);
+      const img = tile.querySelector('.cam-img');
+      startCamStream(img, ns);
+    }
+  });
+
   // 每帧更新语义徽标（person/pallet/clear，来自 fleet_manager_ai 的 YOLO 层）
   (agvs || []).forEach((a) => {
     const sem = cameraGrid.querySelector(`.cam-sem[data-ns="${a.ns}"]`);
