@@ -45,6 +45,7 @@ class RosBridge(QObject):
         self._exec.add_node(self._node)
         self._thread = threading.Thread(target=self._spin, daemon=True)
         self._cam_subs = []          # 当前相机的订阅（切车时销毁）
+        self._active_cam = None
         self._path_subs = {}         # ns -> sub
         self._map_ns = map_ns
         self._map_sub = None
@@ -73,7 +74,8 @@ class RosBridge(QObject):
 
     def shutdown(self):
         self._exec.shutdown()
-        self._thread.join(timeout=2.0)
+        if self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         self._node.destroy_node()
 
     # ---- 订阅管理 ----
@@ -89,6 +91,8 @@ class RosBridge(QObject):
         self._set_map_sub(ns)
 
     def set_active_camera(self, ns):
+        if ns == self._active_cam:
+            return
         for s in self._cam_subs:
             self._node.destroy_subscription(s)
         self._cam_subs = []
@@ -100,6 +104,7 @@ class RosBridge(QObject):
         self._cam_subs.append(self._node.create_subscription(
             String, det_topic,
             lambda m, ns=ns: self._on_detections(ns, m), 10))
+        self._active_cam = ns
 
     def ensure_path_sub(self, ns):
         if ns in self._path_subs:

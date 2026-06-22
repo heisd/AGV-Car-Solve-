@@ -26,6 +26,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("AGV 仓库调度中心 (QT)")
         self.resize(1480, 900)
         self._selected = None
+        self._fs = None
 
         central = QWidget()
         root = QHBoxLayout(central)
@@ -72,6 +73,7 @@ class MainWindow(QMainWindow):
             fs = FleetState.from_json(raw)
         except (ValueError, TypeError):
             return
+        self._fs = fs
         self._map.set_fleet_state(fs)
         self._tasks.update_state(fs)
         self._fleet.update_state(fs)
@@ -88,8 +90,13 @@ class MainWindow(QMainWindow):
         self._map.set_selected_robot(ns)
 
     def _on_map_clicked(self, wx, wy):
-        if self._selected:
-            self._bridge.publish_goal(self._selected, wx, wy)
+        if not self._selected:
+            return
+        agv = next((a for a in (self._fs.agvs if self._fs else [])
+                    if a.ns == self._selected), None)
+        if agv is None or agv.state != 'IDLE':
+            return  # web parity: manual goal only allowed for an IDLE AGV
+        self._bridge.publish_goal(self._selected, wx, wy)
 
     def closeEvent(self, ev):
         self._bridge.shutdown()

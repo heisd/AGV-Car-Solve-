@@ -23,10 +23,14 @@ class MapView(QWidget):
         self._paths = {}             # ns -> [(x,y)]
         self._selected = None
         self._drag = None
+        self._ns_index = {}
 
     # ---- 槽 ----
     def set_fleet_state(self, fs):
         self._fs = fs
+        for a in fs.agvs:
+            if a.ns and a.ns not in self._ns_index:
+                self._ns_index[a.ns] = len(self._ns_index)
         self.update()
 
     def set_map(self, ns, grid):
@@ -100,11 +104,10 @@ class MapView(QWidget):
             p.drawText(int(x) + 2, int(y) - 3, name)
 
     def _draw_paths(self, p):
-        ns_index = {a.ns: i for i, a in enumerate(self._fs.agvs)} if self._fs else {}
         for ns, pts in self._paths.items():
             if not pts:
                 continue
-            i = ns_index.get(ns, 0)
+            i = self._ns_index.get(ns, 0)
             pen = QPen(QColor(AGV_COLORS[i % len(AGV_COLORS)]))
             pen.setWidth(2)
             pen.setStyle(Qt.DashLine)
@@ -117,7 +120,7 @@ class MapView(QWidget):
             if a.x is None or a.y is None:
                 continue
             cx, cy = self._t.to_px(a.x, a.y)
-            color = QColor(AGV_COLORS[i % len(AGV_COLORS)])
+            color = QColor(AGV_COLORS[self._ns_index.get(a.ns, i) % len(AGV_COLORS)])
             s = 9.0
             pts = [(0, -s), (s * 0.7, s * 0.7), (-s * 0.7, s * 0.7)]
             ca, sa = math.cos(a.yaw), math.sin(a.yaw)
