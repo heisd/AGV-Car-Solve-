@@ -38,14 +38,24 @@ class FleetTable(_Table):
         self.itemSelectionChanged.connect(self._on_sel)
 
     def update_state(self, fs):
+        # remember which robot (by ns) was selected, to restore after refill
+        prev = None
+        idx = self.currentRow()
+        if 0 <= idx < len(self._rows):
+            prev = self._rows[idx]
         self._rows = [a.ns for a in fs.agvs]
+        self.blockSignals(True)
         rows = []
         for a in fs.agvs:
             pos = "-" if a.x is None else f"({a.x:.1f}, {a.y:.1f})"
             home = "-" if a.home_x is None else f"({a.home_x:.1f}, {a.home_y:.1f})"
-            rows.append((a.ns, a.state, f"{a.battery*100:.0f}%",
+            bat = "-" if a.battery is None else f"{a.battery*100:.0f}%"
+            rows.append((a.ns, a.state, bat,
                          "是" if a.carrying else "否", pos, home))
         self._fill(rows)
+        if prev in self._rows:
+            self.selectRow(self._rows.index(prev))
+        self.blockSignals(False)
 
     def _on_sel(self):
         idx = self.currentRow()

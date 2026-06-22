@@ -34,5 +34,7 @@ def test_row_table(qapp):
 
 
 def test_anomaly_list(qapp):
+    from PyQt5.QtGui import QColor
     a = AnomalyList(); a.update_state(FS)
     assert a.count() == 1
+    assert a.item(0).foreground().color() == QColor('#ff6b6b')  # error level
