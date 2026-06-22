@@ -20,6 +20,17 @@ def test_task_table(qapp):
     assert t.rowCount() == 1
 
 
+def test_task_table_selected_id(qapp):
+    t = TaskTable(); t.update_state(FS)
+    t.selectRow(0)
+    assert t.selected_task_id() == "T1"
+
+
+def test_task_table_selected_id_none_when_unselected(qapp):
+    t = TaskTable(); t.update_state(FS)
+    assert t.selected_task_id() is None
+
+
 def test_fleet_table_select(qapp):
     t = FleetTable(); t.update_state(FS)
     got = []

@@ -1,6 +1,6 @@
 """MainWindow：左地图 + 右 QScrollArea（相机/异常/下发/任务/车队/路权/日志）。"""
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-                             QScrollArea, QLabel)
+                             QScrollArea, QLabel, QPushButton, QMessageBox)
 
 from amr_qt_panel.model.fleet_state import FleetState
 from amr_qt_panel.widgets.camera_view import CameraView
@@ -43,10 +43,15 @@ class MainWindow(QMainWindow):
         self._fleet = FleetTable()
         self._row = RowTable()
         self._log = LogList()
+        self._cancel_btn = QPushButton("取消选中任务")
+        self._cancel_btn.clicked.connect(self._on_cancel_clicked)
+        tasks_box = _titled("任务分配情况", self._tasks)
+        tasks_box.layout().addWidget(self._cancel_btn)
+
         side.addWidget(self._camera, 2)
         side.addWidget(_titled("系统异常", self._anomaly))
         side.addWidget(_titled("下发任务", self._form))
-        side.addWidget(_titled("任务分配情况", self._tasks))
+        side.addWidget(tasks_box)
         side.addWidget(_titled("车队状态", self._fleet))
         side.addWidget(_titled("路权与走廊状态", self._row))
         side.addWidget(self._log)
@@ -67,6 +72,8 @@ class MainWindow(QMainWindow):
         self._map.map_clicked.connect(self._on_map_clicked)
         self._fleet.robot_selected.connect(self._on_robot_selected)
         self._form.dispatch.connect(bridge.publish_add_task)
+        self._form.charge_dispatch.connect(
+            lambda agv, charger: self._bridge.publish_charge(agv, charger))
 
     def _on_fleet_state_raw(self, raw):
         try:
@@ -88,6 +95,15 @@ class MainWindow(QMainWindow):
     def _on_robot_selected(self, ns):
         self._selected = ns
         self._map.set_selected_robot(ns)
+
+    def _on_cancel_clicked(self):
+        task_id = self._tasks.selected_task_id()
+        if not task_id:
+            return
+        if QMessageBox.question(
+                self, "确认取消", f"确认取消任务 {task_id}？",
+                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self._bridge.publish_cancel(task_id)
 
     def _on_map_clicked(self, wx, wy):
         if not self._selected:

@@ -66,6 +66,7 @@ class AGVState:
         self.carrying = False
         self.nav_ready = False  # 该车 Nav2(导航栈) 是否已激活就绪
         self.stuck = False      # 朝目标长时间无进展（卡死/被堵）
+        self.manual_charge = False  # 操作员手动派去充电（充满前不提前返回）
         self.plan_poses = []    # 规划路径
 
         # --- Semantic perception state (YOLO layer) ---
@@ -104,6 +105,10 @@ class FleetManagerAI(Node):
         self.declare_parameter('home_xy', [])
         self.declare_parameter('require_nav_ready', False)
         self.declare_parameter('world_file', '')
+        # 卡死车默认让出走廊路权（释放占用 + 强制后撤），避免异常占用走廊堵死他车。
+        self.declare_parameter('release_corridor_on_stuck', True)
+        # 手动充电充满阈值：手动派去充电的车充到该比例才回 IDLE（自动充电仍用 resume_thr）。
+        self.declare_parameter('full_charge_threshold', 0.99)
 
         self.ns_list = list(self.get_parameter('robot_namespaces').value)
         self.low_thr = float(self.get_parameter('battery_low_threshold').value)
@@ -112,6 +117,8 @@ class FleetManagerAI(Node):
         self.batt_topic_type = str(self.get_parameter('battery_topic_type').value)
         self.charger_zone_names = list(self.get_parameter('charger_zone_names').value)
         self.require_nav_ready = bool(self.get_parameter('require_nav_ready').value)
+        self.release_corridor_on_stuck = bool(self.get_parameter('release_corridor_on_stuck').value)
+        self.full_charge_thr = float(self.get_parameter('full_charge_threshold').value)
 
         world_file = str(self.get_parameter('world_file').value or '').strip()
         self.world_name = os.path.splitext(os.path.basename(world_file))[0] if world_file else 'warehouse'
@@ -224,6 +231,8 @@ class FleetManagerAI(Node):
         self._yield_since: dict = {}            # ns -> 进入让行的时刻
         self._yield_min_dwell = 0.5             # s，让行最短保持时长
         self._deadlock_timeout = 8.0            # s，让行久堵兜底
+        self._stuck_retreated: set = set()      # 已因卡死后撤过的车（每次卡死仅后撤一次）
+        self._stuck_resume_zone: dict = {}      # ns -> 卡死前的任务目标区（恢复时还原）
 
         # 碰撞检测
         self.collision_dist = 0.55               # m
@@ -236,6 +245,8 @@ class FleetManagerAI(Node):
         #   IN:  /fleet/add_task(std_msgs/String, JSON)  {"pickup":<zone>,"dropoff":<zone>[,...]}
         self.fleet_state_pub = self.create_publisher(String, '/fleet/state', 10)
         self.create_subscription(String, '/fleet/add_task', self.cb_add_task, 10)
+        #   IN:  /fleet/cancel_task(std_msgs/String, JSON)  {"id":<task_id>}
+        self.create_subscription(String, '/fleet/cancel_task', self.cb_cancel_task, 10)
         self._added_task_seq = 0
         self.create_timer(0.33, self.publish_fleet_state)
 
@@ -523,6 +534,20 @@ class FleetManagerAI(Node):
         self.get_logger().warn(
             f"[{ns}] 路权久堵({self._deadlock_timeout:.0f}s) → 强制后撤让路。")
 
+    def _vacate_stuck(self, ns):
+        """卡死车让出走廊：移除其段占用（不锁段、不逼别人让行），并（每次卡死仅一次）
+        强制后撤到等待点。后撤会清空任务目标，故先记下以便恢复时还原。"""
+        for s, occ in self._segment_occupants.items():
+            if ns in occ:
+                occ.remove(ns)
+                if not occ:
+                    self._segment_dir.pop(s, None)
+        if ns not in self._stuck_retreated:
+            self._stuck_resume_zone[ns] = self.target_zone_of(ns)
+            self._force_retreat(ns)
+            self._stuck_retreated.add(ns)
+            self.get_logger().warn(f"[{ns}] 导航卡死 → 让出走廊路权并后撤。")
+
     def _retreat_wait_point(self, ns):
         """选 ns 当前所在段的等待点中、离"被挡段"最远的那个。"""
         agv = self.agv[ns]
@@ -615,6 +640,11 @@ class FleetManagerAI(Node):
             at_home = (agv.state == 'IDLE' and home is not None
                        and dist(agv.pose, home) <= self.standby_tol)
             if agv.state == 'CHARGING' or at_home:
+                continue
+            # 卡死车：让出走廊路权（不锁段、不逼别人让行）并强制后撤一次，避免冻死在
+            # 走廊里把别的车堵死。物理避碰交给 Nav2 局部代价地图。
+            if self.release_corridor_on_stuck and agv.stuck:
+                self._vacate_stuck(ns)
                 continue
             p = set(self.detect_segments(agv.pose))
             phys[ns] = p
@@ -736,6 +766,20 @@ class FleetManagerAI(Node):
     def run_agv(self, ns):
         agv = self.agv[ns]
         now = time.time()
+
+        # 卡死后撤恢复：已后撤到等待点 → 清卡死、还原任务目标并重发，重新尝试导航。
+        # 期间走廊已由 apply_traffic_rules 让出；后撤途中本拍不跑常规 FSM，避免与后撤目标打架。
+        if ns in self._stuck_retreated:
+            wp = self._wait_target.get(ns)
+            if agv.pose is not None and (wp is None or dist(agv.pose, wp) <= self.standby_tol):
+                self._stuck_retreated.discard(ns)
+                agv.stuck = False
+                rz = self._stuck_resume_zone.pop(ns, None)
+                if rz is not None:
+                    setattr(self, f'_target_zone_{ns}', rz)
+                self.reissue_goal(ns)
+            return
+
         # Battery low → head to charger
         if agv.state in ('IDLE', 'TO_PICKUP', 'TO_DROPOFF') and agv.battery < self.low_thr and not agv.on_charger:
             cz_name = self.nearest_charger(agv.pose)
@@ -748,13 +792,18 @@ class FleetManagerAI(Node):
                 self.get_logger().info(f"[{ns}] Battery low ({agv.battery:.2f}). Heading to charger {cz_name}.")
             return
 
-        # Battery recovered while at charger
-        if agv.state in ('CHARGING', 'TO_CHARGER') and (agv.battery >= self.resume_thr) and agv.on_charger:
-            self.release_all(ns)
-            agv.state = 'IDLE'
-            agv.state_since = now
-            self.get_logger().info(f"[{ns}] Battery recovered ({agv.battery:.2f}). Back to IDLE.")
-            return
+        # Battery recovered while at charger. Manual charge (operator-dispatched)
+        # holds until (near-)full so "去充电区" actually charges; auto charge
+        # leaves as soon as it crosses the resume threshold.
+        if agv.state in ('CHARGING', 'TO_CHARGER') and agv.on_charger:
+            leave_thr = self.full_charge_thr if agv.manual_charge else self.resume_thr
+            if agv.battery >= leave_thr:
+                self.release_all(ns)
+                agv.manual_charge = False
+                agv.state = 'IDLE'
+                agv.state_since = now
+                self.get_logger().info(f"[{ns}] Battery recovered ({agv.battery:.2f}). Back to IDLE.")
+                return
 
         # State logic
         if agv.state == 'IDLE':
@@ -947,12 +996,21 @@ class FleetManagerAI(Node):
     # ======== Web / dispatch-center interface ========
 
     def cb_add_task(self, msg: String):
-        """Append a transport task submitted from the web panel."""
+        """Append a transport task, or dispatch a manual charge command.
+
+        type=='charge' → send a specific IDLE car to a specific charger now
+        (operator override). Otherwise (no type) → queue a pickup→dropoff task.
+        """
         try:
             data = json.loads(msg.data)
         except (ValueError, TypeError) as e:
             self.get_logger().warn(f"/fleet/add_task: invalid JSON ({e})")
             return
+
+        if data.get('type') == 'charge':
+            self._dispatch_manual_charge(data)
+            return
+
         pickup = data.get('pickup')
         dropoff = data.get('dropoff')
         if pickup not in self.zones or dropoff not in self.zones:
@@ -971,6 +1029,68 @@ class FleetManagerAI(Node):
         self.task_queue.append(task)
         self.get_logger().info(
             f"[dispatch] queued task {task['id']}: {pickup} -> {dropoff} (queue={len(self.task_queue)})")
+
+    def _dispatch_manual_charge(self, data):
+        """操作员手动把指定 IDLE 车派往指定充电桩（立即生效，不入队列）。"""
+        ns = data.get('agv')
+        charger = data.get('charger')
+        if ns not in self.agv:
+            self.get_logger().warn(f"/fleet/add_task: charge — unknown agv {ns}")
+            return
+        if charger not in self.charger_zone_names or charger not in self.zones:
+            self.get_logger().warn(
+                f"/fleet/add_task: charge — {charger} is not a known charger "
+                f"(chargers={self.charger_zone_names})")
+            return
+        agv = self.agv[ns]
+        if agv.state != 'IDLE':
+            self.get_logger().warn(
+                f"/fleet/add_task: charge — {ns} not IDLE (state={agv.state}); ignored")
+            return
+        self.release_all(ns)
+        self.reserve(charger, ns)
+        agv.task = None
+        agv.manual_charge = True
+        agv.state = 'TO_CHARGER'
+        agv.state_since = time.time()
+        self.nav_to_zone(ns, charger)
+        self.get_logger().info(f"[dispatch] {ns} 手动充电 → {charger}")
+
+    def cb_cancel_task(self, msg: String):
+        """按 id 取消任务：队列任务直接移除；执行中任务停车、卸货、释放占用、回 IDLE。"""
+        try:
+            task_id = str(json.loads(msg.data).get('id', ''))
+        except (ValueError, TypeError) as e:
+            self.get_logger().warn(f"/fleet/cancel_task: invalid JSON ({e})")
+            return
+        if not task_id:
+            return
+
+        # 1) 排队中（还没派车）→ 直接从队列删除
+        before = len(self.task_queue)
+        self.task_queue = [t for t in self.task_queue if str(t.get('id')) != task_id]
+        if len(self.task_queue) != before:
+            self.get_logger().info(f"[dispatch] 取消排队任务 {task_id}")
+            return
+
+        # 2) 执行中（已派给某车）→ 停车并复位该车
+        for ns, agv in self.agv.items():
+            if agv.task and str(agv.task.get('id')) == task_id:
+                self._cancel_nav_goal(ns)
+                self.release_all(ns)
+                self.set_carrying(ns, False)
+                agv.task = None
+                agv.manual_charge = False
+                agv.stuck = False
+                self._stuck_retreated.discard(ns)
+                self._stuck_resume_zone.pop(ns, None)
+                agv.state = 'IDLE'
+                agv.state_since = time.time()
+                self._home_last_sent[ns] = 0.0
+                self.get_logger().info(f"[dispatch] 取消执行中任务 {task_id}（{ns} → IDLE）")
+                return
+
+        self.get_logger().warn(f"/fleet/cancel_task: unknown task id {task_id}")
 
     def publish_fleet_state(self):
         """Publish a JSON snapshot of the whole fleet for the web operator panel."""

@@ -16,7 +16,9 @@ from std_msgs.msg import String
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from amr_qt_panel.model.image_convert import image_to_qimage
-from amr_qt_panel.ros_helpers import add_task_payload, camera_topics, yaw_to_quat
+from amr_qt_panel.ros_helpers import (add_task_payload, camera_topics,
+                                      cancel_task_payload, charge_payload,
+                                      yaw_to_quat)
 
 
 _MAP_QOS = QoSProfile(
@@ -61,6 +63,8 @@ class RosBridge(QObject):
         self._goal_pubs = {}
         self._add_task_pub = self._node.create_publisher(
             String, '/fleet/add_task', 10)
+        self._cancel_task_pub = self._node.create_publisher(
+            String, '/fleet/cancel_task', 10)
 
     # ---- 生命周期 ----
     def start(self):
@@ -149,3 +153,9 @@ class RosBridge(QObject):
 
     def publish_add_task(self, pickup, dropoff):
         self._add_task_pub.publish(String(data=add_task_payload(pickup, dropoff)))
+
+    def publish_charge(self, agv, charger):
+        self._add_task_pub.publish(String(data=charge_payload(agv, charger)))
+
+    def publish_cancel(self, task_id):
+        self._cancel_task_pub.publish(String(data=cancel_task_payload(task_id)))

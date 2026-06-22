@@ -22,11 +22,20 @@ class _Table(QTableWidget):
 class TaskTable(_Table):
     def __init__(self):
         super().__init__(["任务编号", "小车编号", "运行状态", "任务内容"])
+        self._ids = []
 
     def update_state(self, fs):
+        self._ids = [t.id for t in fs.tasks]
         rows = [(t.id, t.agv or '-', t.status,
                  f"{t.pickup or '?'} → {t.dropoff or '?'}") for t in fs.tasks]
         self._fill(rows)
+
+    def selected_task_id(self):
+        """当前选中行的任务 id；无选中返回 None。"""
+        idx = self.currentRow()
+        if 0 <= idx < len(self._ids) and self.selectionModel().hasSelection():
+            return self._ids[idx]
+        return None
 
 
 class FleetTable(_Table):

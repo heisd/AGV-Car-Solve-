@@ -1,11 +1,23 @@
 import json
 import math
-from amr_qt_panel.ros_helpers import add_task_payload, yaw_to_quat, camera_topics
+from amr_qt_panel.ros_helpers import (add_task_payload, charge_payload,
+                                      cancel_task_payload, yaw_to_quat,
+                                      camera_topics)
 
 
 def test_add_task_payload():
     d = json.loads(add_task_payload('pickup_zone_A', 'dropoff_zone_B'))
     assert d == {'pickup': 'pickup_zone_A', 'dropoff': 'dropoff_zone_B'}
+
+
+def test_charge_payload():
+    d = json.loads(charge_payload('agv1', 'charger_1'))
+    assert d == {'type': 'charge', 'agv': 'agv1', 'charger': 'charger_1'}
+
+
+def test_cancel_task_payload():
+    d = json.loads(cancel_task_payload('T1'))
+    assert d == {'id': 'T1'}
 
 
 def test_yaw_to_quat_zero():
