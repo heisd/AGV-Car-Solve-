@@ -34,7 +34,7 @@ A Multi-AGV (Autonomous Mobile Robot) intelligent warehouse dispatching and coll
 
 ## 🛠️ Quick Start
 
-For detailed step-by-step guidance, please check the [Operations Guide](file:///home/li/GazeboLib/doc/operations-guide.md).
+For detailed step-by-step guidance, please check the [Operations Guide](./doc/operations-guide.md).
 
 ### 1. Install Dependencies
 Requires Ubuntu 22.04 + ROS 2 Humble + Gazebo Classic 11.
@@ -47,7 +47,8 @@ python3 -m pip install --user -U "transforms3d>=0.4.2"
 ### 2. Build Workspace
 Compile in sequential execution mode to avoid compiler workspace parallel lock contention:
 ```zsh
-cd ~/GazeboLib
+git clone --branch WSLHumble https://github.com/heisd/AGV-Car-Solve-.git
+cd AGV-Car-Solve-
 source /opt/ros/humble/setup.zsh
 colcon build --symlink-install --executor sequential
 ```
@@ -71,7 +72,7 @@ http://localhost:8080/
 
 ## 📖 Related Documents
 For underlying engineering design and configurations:
-- [Operations & Troubleshooting Manual (operations-guide.md)](file:///home/li/GazeboLib/doc/operations-guide.md)
-- [Dual Navigation Modes & Fallback Tracker (navigation-modes-and-fallback.md)](file:///home/li/GazeboLib/doc/navigation-modes-and-fallback.md)
-- [Corridor Right-of-Way Locking Scheme (right-of-way-design.md)](file:///home/li/GazeboLib/doc/right-of-way-design.md)
-- [Warehouse 2D Mapping Guidelines (mapping-guide.md)](file:///home/li/GazeboLib/doc/mapping-guide.md)
+- [Operations & Troubleshooting Manual (operations-guide.md)](./doc/operations-guide.md)
+- [Dual Navigation Modes & Fallback Tracker (navigation-modes-and-fallback.md)](./doc/navigation-modes-and-fallback.md)
+- [Corridor Right-of-Way Locking Scheme (right-of-way-design.md)](./doc/right-of-way-design.md)
+- [Warehouse 2D Mapping Guidelines (mapping-guide.md)](./doc/mapping-guide.md)
