@@ -76,3 +76,76 @@ http://localhost:8080/
 - [双重导航驱动与就绪判断设计 (navigation-modes-and-fallback.md)](./doc/navigation-modes-and-fallback.md)
 - [走廊路权锁段预约设计 (right-of-way-design.md)](./doc/right-of-way-design.md)
 - [仓库 SLAM 建图指引 (mapping-guide.md)](./doc/mapping-guide.md)
+
+## 两种导航模式的边界
+
+| 项目 | Nav2 模式 | 仿真真值跟随模式 |
+| --- | --- | --- |
+| 入口 | warehouse_fleet_nav2.launch.py | warehouse_fleet.launch.py |
+| 位姿与导航链路 | 使用定位、规划与 Nav2 接口 | 使用仿真真值和轻量跟随逻辑 |
+| 适合用途 | 完整导航集成与多车调试 | 快速演示、资源受限的流程检查 |
+| 避障理解 | 需检查地图、代价地图与规划行为 | 前向减速不能视为完整绕障能力 |
+| 面板导航就绪提示 | 反映 Nav2 就绪状态 | 可能持续显示未就绪，不能直接据此判定整个系统故障 |
+
+两种模式的设计和状态解释见 [导航模式说明](./doc/navigation-modes-and-fallback.md)。真值驱动属于仿真便利机制，不能直接作为实机导航能力的验证结果。
+
+## 启动参数与调试范围
+
+操作指南记录的常用参数如下，实际可用参数可通过 launch 的帮助信息核对：
+
+| 参数 | 默认值 | 用途 |
+| --- | --- | --- |
+| num_agvs | 2 | 车队数量 |
+| gui | true | 是否显示 Gazebo 界面 |
+| use_web | true | 是否启动 Web 面板 |
+| world | 包内仓库场景 | 指定世界文件路径 |
+
+```zsh
+ros2 launch amr_description warehouse_fleet_nav2.launch.py --show-args
+ros2 launch amr_description warehouse_fleet_nav2.launch.py num_agvs:=1 gui:=false use_web:=false
+```
+
+首次定位故障时可缩小到单车；完整演示再恢复默认两车。增加车辆数量会增加仿真与导航计算量，项目没有对所有硬件配置给出性能保证。
+
+本页使用 zsh 示例；如果实际终端是 Bash，请使用对应的 `setup.bash`。不要只修改代码块语言标记而继续加载不匹配的环境脚本。
+
+## 下发第一条运输任务
+
+在 Web 面板选择取货点与卸货点，提交任务后观察车队状态、任务变化和地图路径。文档中的示例区域包括：
+
+| 名称 | 作用 |
+| --- | --- |
+| pickup_A / pickup_B | 取货点 |
+| dropoff_A / dropoff_B | 卸货点 |
+| charger_1 | 充电点 |
+
+操作指南描述了从 IDLE 车辆进行手动导航的行为；执行任务中的车不应被当作空闲车继续下发手动目标。区域坐标和服务接口应以当前配置及指南为准。
+
+## 分层排障
+
+```zsh
+ros2 node list
+ros2 topic list -t
+ros2 topic echo /fleet/state --field data --once
+ros2 topic echo /agv1/plan --once
+```
+
+| 现象 | 检查顺序 |
+| --- | --- |
+| Gazebo 中没有车 | 场景加载、spawn 与启动日志 |
+| 面板打不开 | 网页服务是否启动、8080 端口是否可访问 |
+| 网页打开但没有车队数据 | rosbridge 与 ROS 节点、话题及浏览器连接 |
+| Nav2 未就绪 | 仿真时钟、TF、定位、生命周期与资源占用 |
+| 车辆停在走廊 | 先区分正常路权等待、让行与规划失败 |
+| 目标不可达 | 地图、障碍物、目标坐标与路径结果 |
+
+停止时优先在启动终端按 `Ctrl+C`，再确认相关进程退出。重启前检查是否有上一轮残留节点，避免同名节点、重复 TF 或端口占用影响判断。
+
+## 进一步阅读
+
+- [操作、配置与常见故障](./doc/operations-guide.md)
+- [导航模式与回退机制](./doc/navigation-modes-and-fallback.md)
+- [走廊路权设计](./doc/right-of-way-design.md)
+- [SLAM 建图指引](./doc/mapping-guide.md)
+
+本项目用于仓库仿真与算法集成学习。这里的功能与启动方法依据仓库实现和现有指南整理，未宣称经过实机迁移或全部场景的无死锁验证。
