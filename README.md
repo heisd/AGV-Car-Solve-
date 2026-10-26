@@ -34,7 +34,7 @@
 
 ## 🛠️ 快速启动
 
-详细安装与配置步骤请参阅 [系统操作指南](file:///home/li/GazeboLib/doc/operations-guide.md)。
+详细安装与配置步骤请参阅 [系统操作指南](./doc/operations-guide.md)。
 
 ### 1. 依赖安装
 系统需要 Ubuntu 22.04 + ROS 2 Humble + Gazebo Classic 11。
@@ -47,7 +47,8 @@ python3 -m pip install --user -U "transforms3d>=0.4.2"
 ### 2. 编译项目
 请在项目根目录下使用顺序执行器进行编译以避免并行冲突：
 ```zsh
-cd ~/GazeboLib
+git clone --branch WSLHumble https://github.com/heisd/AGV-Car-Solve-.git
+cd AGV-Car-Solve-
 source /opt/ros/humble/setup.zsh
 colcon build --symlink-install --executor sequential
 ```
@@ -71,7 +72,7 @@ http://localhost:8080/
 
 ## 📖 相关文档
 更多深入细节和设计方案，请阅读：
-- [系统操作与排障指南 (operations-guide.md)](file:///home/li/GazeboLib/doc/operations-guide.md)
-- [双重导航驱动与就绪判断设计 (navigation-modes-and-fallback.md)](file:///home/li/GazeboLib/doc/navigation-modes-and-fallback.md)
-- [走廊路权锁段预约设计 (right-of-way-design.md)](file:///home/li/GazeboLib/doc/right-of-way-design.md)
-- [仓库 SLAM 建图指引 (mapping-guide.md)](file:///home/li/GazeboLib/doc/mapping-guide.md)
+- [系统操作与排障指南 (operations-guide.md)](./doc/operations-guide.md)
+- [双重导航驱动与就绪判断设计 (navigation-modes-and-fallback.md)](./doc/navigation-modes-and-fallback.md)
+- [走廊路权锁段预约设计 (right-of-way-design.md)](./doc/right-of-way-design.md)
+- [仓库 SLAM 建图指引 (mapping-guide.md)](./doc/mapping-guide.md)
